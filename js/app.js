@@ -1566,7 +1566,7 @@ function renderAccountSection() {
   const isGodRoom = isGodOverrideRoom();
   const room = isGodRoom ? auth.godOverrideRoomMeta : auth.rooms.find(r => r.id === auth.activeRoomId);
   const roleLabel = isGodRoom ? 'Admin (God Mode)' : m && m.role === 'admin' ? 'Admin' : m && m.role === 'viewer' ? 'View only' : 'Can edit';
-  const canPickBro = !isGodRoom && (!(m && m.player_id) || m.player_id === 'unassigned');
+  const canPickBro = !isGodRoom && m.player_id === 'unassigned';
 
   let html = signedInCardHtml(username);
   html += `<div class="card">
