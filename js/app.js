@@ -1566,7 +1566,7 @@ function renderAccountSection() {
   const isGodRoom = isGodOverrideRoom();
   const room = isGodRoom ? auth.godOverrideRoomMeta : auth.rooms.find(r => r.id === auth.activeRoomId);
   const roleLabel = isGodRoom ? 'Admin (God Mode)' : m && m.role === 'admin' ? 'Admin' : m && m.role === 'viewer' ? 'View only' : 'Can edit';
-  const canPickBro = !isGodRoom && (isAdmin() || !(m && m.player_id) || m.player_id === 'unassigned');
+  const canPickBro = !isGodRoom && (!(m && m.player_id) || m.player_id === 'unassigned');
 
   let html = signedInCardHtml(username);
   html += `<div class="card">
@@ -1576,7 +1576,7 @@ function renderAccountSection() {
     ${isGodRoom
       ? `<p class="helper-text" style="margin:0;">You're visiting with God Mode admin access — no Bro assignment needed here.</p>`
       : canPickBro
-        ? `<div id="myPlayerPickerWrap"><p class="helper-text" style="margin:0;">Loading…</p></div>`
+        ? `<div id="ickerWrap"><p class="helper-text" style="margin:0;">Loading…</p></div>`
         : `<div class="field" style="margin-bottom:0;"><label>You're playing as</label><p style="margin:4px 0 0; font-weight:700;">${m && m.player_id === 'unassigned' ? 'Unassigned' : playerName(m.player_id)}</p></div>
            <p class="helper-text" style="margin-top:6px;">Only the room admin can change this now.</p>`}
     <button class="btn btn-secondary btn-block" id="switchRoomBtn" style="margin-top:14px;">Switch Room</button>
