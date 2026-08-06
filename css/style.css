@@ -99,12 +99,13 @@ body {
   background: var(--ink);
   padding: 6px 6px calc(var(--bottom-offset) + env(safe-area-inset-bottom));
   box-shadow: 0 -4px 180px rgba(0,0,0,0.18);
-}
 
-.tab-bar.keyboard-open {
+  .keyboard-open {
   transform: translateY(120%);
   transition: transform 0.2s ease;
+  }
 }
+
 
 .tab-btn {
   flex: 1;
