@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Bunker Bros Bonanza</title>
+<meta name="theme-color" content="#1C3D2E">
+<meta name="description" content="Score tracker for the Bunker Bros annual golf trip Bonanza.">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BB Bonanza">
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-header__row">
+    <img src="assets/logo-mark.png" alt="" class="app-header__logo">
+    <div class="app-header__titles">
+      <h1 id="courseNameHeader">Bunker Bros Bonanza</h1>
+      <p id="courseSubHeader">Loading…</p>
+    </div>
+    <span class="sync-dot" id="syncDot" title="Sync status"></span>
+  </div>
+</header>
+
+<main class="app-main">
+
+  <!-- HOME -->
+  <section class="view active" id="view-leaderboard">
+    <p class="eyebrow">Weekend Status</p>
+    <div id="roundStatusWidget"></div>
+
+    <p class="eyebrow" style="margin-top:6px;">Standings</p>
+    <h2 class="section-title">Leaderboard</h2>
+    <div id="leaderboardList"></div>
+
+    <div id="seasonHistoryWidget"></div>
+  </section>
+
+  <!-- SCORECARD -->
+  <section class="view" id="view-rounds">
+    <p class="eyebrow">Scorecards</p>
+    <h2 class="section-title">Scorecard</h2>
+    <div class="segmented" id="roundSegmented">
+      <button data-round="1" class="active">Round 1</button>
+      <button data-round="2">Round 2</button>
+      <button data-round="3">Round 3</button>
+    </div>
+    <div id="roundContent"></div>
+  </section>
+
+  <!-- STATS -->
+  <section class="view" id="view-stats">
+    <p class="eyebrow">The Numbers</p>
+    <h2 class="section-title">Weekend Stats</h2>
+    <div id="statsList"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="view" id="view-settings">
+    <p class="eyebrow">Step 1</p>
+    <h2 class="section-title">Account &amp; Rooms</h2>
+    <div id="accountSection"></div>
+
+    <div class="sand-divider"></div>
+
+    <div id="settingsRevealWrap" style="display:none;">
+      <h2 class="section-title">Settings</h2>
+      <button class="btn btn-secondary btn-block" id="showSettingsBtn">Show Settings</button>
+      <div id="settingsPanels" style="display:none; margin-top:14px;">
+        <div id="gameSettingsSection"></div>
+        <div id="adminSettingsSection"></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<nav class="tab-bar">
+  <button class="tab-btn" data-tab="leaderboard">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+    Home
+  </button>
+  <button class="tab-btn" data-tab="rounds">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 4v-1M16 4v-1"/></svg>
+    Scorecard
+  </button>
+  <div class="center-fab-slot">
+    <button class="center-fab" id="fabScoreEntry" aria-label="Enter Score">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <span class="center-fab-label">Enter Score</span>
+  </div>
+  <button class="tab-btn" data-tab="stats">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-4"/></svg>
+    Stats
+  </button>
+  <button class="tab-btn" data-tab="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Settings
+  </button>
+</nav>
+
+<!-- SCORE ENTRY MODAL -->
+<div class="modal-backdrop hidden" id="scoreModal">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <h2 id="modalRoundTitle">Round 1</h2>
+      <button class="icon-btn" id="closeModalBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div id="modalLoginGate" class="lock-screen" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      <h2>Sign In Required</h2>
+      <p id="modalLoginGateText">You need to sign in and join or create a room before you can enter scores. Head to Settings → Account &amp; Rooms.</p>
+      <button class="btn btn-primary btn-block" id="modalGoToLoginBtn">Go to Account Login</button>
+    </div>
+
+    <div id="modalScoreBody">
+      <p class="helper-text" id="modalLoginNotice" style="display:none;"></p>
+
+      <div class="segmented" id="modalRoundSegmented">
+        <button data-round="1" class="active">Round 1</button>
+        <button data-round="2">Round 2</button>
+        <button data-round="3">Round 3</button>
+      </div>
+
+      <div class="hole-nav">
+        <button class="round-nav-btn" id="prevHoleBtn" aria-label="Previous hole">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="hole-badge">
+          <span id="modalHoleNumber">Hole 1</span>
+          <small id="modalHolePar">Par 4</small>
+        </div>
+        <button class="round-nav-btn" id="nextHoleBtn" aria-label="Next hole">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+
+      <div id="modalWolfOrderBlock" class="subgame-block" style="display:none;">
+        <h3>🐺 Wolf Tee Order (Hole 1)</h3>
+        <p class="helper-text">Set the order the group tees off in. This sets who's wolf each hole on the front nine — it reverses automatically for the back nine.</p>
+        <div id="modalWolfOrderInputs" class="field-row"></div>
+      </div>
+
+      <div id="modalScoreInputs"></div>
+
+      <div id="modalWolfBlock" class="subgame-block" style="display:none;">
+        <h3>🐺 Wolf Selection</h3>
+        <p class="helper-text" id="modalWolfWhoText"></p>
+        <div id="modalWolfOptions" class="radio-row"></div>
+      </div>
+
+      <div id="modalMatchupBlock" class="subgame-block" style="display:none;">
+        <h3 id="modalMatchupTitle">Matchup</h3>
+        <p class="helper-text" id="modalMatchupText"></p>
+      </div>
+
+      <div id="modalAutoResultBlock" class="subgame-block" style="display:none;">
+        <h3 id="modalAutoResultTitle">Hole Result</h3>
+        <p class="helper-text" id="modalAutoResultText">Enter all three strokes to see the result.</p>
+      </div>
+
+      <button class="btn btn-primary btn-block" id="saveHoleBtn" style="margin-top:16px;">Save Hole</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
