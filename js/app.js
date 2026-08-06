@@ -76,7 +76,7 @@ updateKeyboardState();
    DEFAULT STATE
 ---------------------------------------------------------------- */
 function defaultHoles() {
-  const pars = [4,3,4,4,4,5,4,3,4, 5,4,3,5,4,4,4,4,4];
+  const pars = [4,4,3,4,4,4,4,3,5, 4,3,4,5,3,4,5,4,4];
   const idx  = [1,7,6,14,8,9,2,18,17, 11,13,3,5,10,16,4,12,15];
   return pars.map((par, i) => ({ number: i + 1, par, index: idx[i] }));
 }
@@ -93,9 +93,9 @@ function defaultConfig() {
       { id: 'p3', name: 'Player 3' }
     ],
     courses: [
-      defaultCourse('Round 1 Course', 7, 14),
-      defaultCourse('Round 2 Course', 7, 14),
-      defaultCourse('Round 3 Course', 7, 14)
+      defaultCourse('Round 1 Course', 8, 13),
+      defaultCourse('Round 2 Course', 11, 9),
+      defaultCourse('Round 3 Course', 3, 16)
     ],
     dailyGame: { first: 10, second: 4 },
     stableford: { bogey: 1, par: 2, birdie: 3, eagle: 4, albatross: 5 },
