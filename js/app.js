@@ -1302,7 +1302,7 @@ async function updateRoomSettings(name, password) {
   const { error } = await auth.client.rpc('update_room_settings', { p_room_id: auth.activeRoomId, p_name: name || null, p_password: password || '' });
   if (error) { showToast('Could not save — are you the admin?'); return; }
   await loadMyRooms();
-  if (auth.godOverrideRoomMeta && auth.godOverrideRoomMeta.id === auth.activeRoomId && name) auth.godOverrideRoomMeta.name = name;
+  if (auth.godOverrideRoomMeta) auth.godOverrideRoomMeta.name = name;
   showToast('Room settings saved');
   renderAccountSection();
   renderAdminSettings();
