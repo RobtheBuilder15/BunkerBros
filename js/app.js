@@ -194,7 +194,7 @@ function canEditAnyScore() {
   return isAdmin() || (!!auth.session && !!auth.activeRoomId);
 }
 function canEditPlayer(id) {
-  if (!isViewingLive() && !isAdmin()) return false;
+  if (!isViewingLive()) return false;
   if (myRole() === 'viewer') return false;
   return isAdmin() || !!state.config.openScoring || myPlayerId() === id;
 }
