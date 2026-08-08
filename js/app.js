@@ -111,11 +111,26 @@ function resizeRoundHoles(round, newCount) {
   const currentMax = Math.max(0, ...Object.keys(holes).map(Number));
   if (newCount > currentMax) {
     for (let n = 1; n <= newCount; n++) {
-      if (!holes[n]) holes[n] = round.type === 'wolf' ? Object.assign(emptyHoleData(), { wolf: { partner: 'lone' } }) : emptyHoleData();
+      if (!holes[n]) holes[n] = buildEmptyHole(round);
     }
   } else {
     Object.keys(holes).forEach(k => { if (Number(k) > newCount) delete holes[k]; });
   }
+}
+
+const MIN_PLAYERS = 2, MAX_PLAYERS = 8;
+const MIN_ROUNDS = 1, MAX_ROUNDS = 6;
+
+// Builds a blank hole entry shaped for the round's current type, using
+// whatever players are *currently* configured (not the bootstrap p1/p2/p3
+// default) — used any time new holes are created on an already-loaded room
+// (resizing hole count, adding a round, switching a round's game type).
+function buildEmptyHole(round) {
+  if (round && round.type === 'scramble') return { team: null };
+  const d = {};
+  playerIds().forEach(id => d[id] = null);
+  if (round && round.type === 'wolf') d.wolf = { partner: 'lone' };
+  return d;
 }
 
 function defaultConfig() {
@@ -151,7 +166,7 @@ function defaultRounds() {
     return holes;
   };
   return [
-    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: '3-Way Match Play',
+    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: 'Match Play',
       holes: makeHoles(), ctpWinner: null, ldWinner: null },
     { id: 2, type: 'wolf', label: 'Round 2', gameName: 'Wolf',
       holes: makeHoles(() => ({ wolf: { partner: 'lone' } })), ctpWinner: null, ldWinner: null,
@@ -175,7 +190,7 @@ function loadRoomCache(roomId) {
       if (parsed && parsed.config && parsed.rounds) {
         if (!parsed.archivedSeasons) parsed.archivedSeasons = [];
         if (!parsed.year) parsed.year = String(new Date().getFullYear());
-        if (!parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
+        if (parsed.rounds[1] && !parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
         if (parsed.config.openScoring == null) parsed.config.openScoring = false;
         if (parsed.config.courses) parsed.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
         (parsed.archivedSeasons || []).forEach(s => { if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; }); });
@@ -369,8 +384,8 @@ function oneOneOneHolePoints(holeData, holeNumber) {
 function computeDailyAwards(totals) {
   const first = state.config.dailyGame.first;
   const second = state.config.dailyGame.second;
-  const positions = [first, second, 0];
   const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  const positions = [first, second, ...Array(Math.max(0, entries.length - 2)).fill(0)];
   const awards = {};
   let i = 0;
   while (i < entries.length) {
@@ -393,11 +408,24 @@ function computeRound(round, roundIdx) {
   let bestBallTotal = 0, bestBallHolesCounted = 0;
   let holesComplete = 0;
   const holeCount = courseFor(roundIdx).holeCount || 18;
+  const isScramble = round.type === 'scramble';
 
   for (let n = 1; n <= holeCount; n++) {
     const hd = round.holes[n];
     const hc = holeConfig(roundIdx, n);
     const par = hc.par;
+
+    // Scramble is just one shared team score per hole — it never
+    // contributes to Stableford, game points, or CTP/Longest Drive, so it's
+    // handled as a self-contained branch rather than threading through the
+    // per-player math below.
+    if (isScramble) {
+      const teamScore = hd.team;
+      if (teamScore != null) holesComplete++;
+      perHole.push({ number: n, par, index: hc.index, scores: hd, stableford: {}, gamePoints: null, meta: null, bestBall: null, teamScore });
+      continue;
+    }
+
     const stableford = {};
     ids.forEach(id => {
       const pts = stablefordForScore(hd[id], par);
@@ -431,10 +459,10 @@ function computeRound(round, roundIdx) {
     perHole.push({ number: n, par, index: hc.index, scores: hd, stableford, gamePoints, meta, bestBall });
   }
 
-  const dailyAwards = holesComplete > 0 ? computeDailyAwards(rawGameTotals) : Object.fromEntries(ids.map(id => [id, 0]));
+  const dailyAwards = (!isScramble && holesComplete > 0) ? computeDailyAwards(rawGameTotals) : Object.fromEntries(ids.map(id => [id, 0]));
   const finalized = holesComplete === holeCount;
 
-  return { perHole, rawGameTotals, stablefordTotals, strokeTotals, dailyAwards, bestBallTotal, bestBallHolesCounted, holesComplete, finalized };
+  return { perHole, rawGameTotals, stablefordTotals, strokeTotals, dailyAwards, bestBallTotal, bestBallHolesCounted, holesComplete, finalized, isScramble };
 }
 
 function sumOutInTotal(perHole, keyFn) {
@@ -499,8 +527,9 @@ function computeStats(computed) {
     const rc = computed.rounds[ri];
     // "Best round score" and "most Stableford in a round" only make sense
     // comparing like-for-like — a 9-hole round can't fairly beat/lose to an
-    // 18-hole one, so those rounds are skipped for these two stats only.
-    const fullRound = (courseFor(ri + 1).holeCount || 18) === 18;
+    // 18-hole one, and Scramble has no individual strokes at all, so those
+    // rounds are skipped for these two stats only.
+    const fullRound = (courseFor(ri + 1).holeCount || 18) === 18 && round.type !== 'scramble';
 
     if (fullRound) {
       ids.forEach(id => {
@@ -728,10 +757,8 @@ function wolfCompactCell(round, n) {
 }
 
 function renderRoundsView() {
+  renderRoundTabs();
   if (!appReady()) { document.getElementById('roundContent').innerHTML = readyGateHtml(); return; }
-  document.querySelectorAll('#roundSegmented button').forEach(b => {
-    b.classList.toggle('active', Number(b.dataset.round) === activeRoundTab);
-  });
   const computed = computeAll();
   const round = state.rounds[activeRoundTab - 1];
   const rc = computed.rounds[activeRoundTab - 1];
@@ -764,69 +791,87 @@ function renderRoundsView() {
   const idxCells = holesArr.map(n => `<td class="${holeColClasses(course, n)}">${holeConfig(activeRoundTab, n).index}</td>`);
   html += assembleRow('<td>Index</td>', idxCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'index-row');
 
-  // Player rows
-  ids.forEach(id => {
-    const collapsed = !!collapsedPlayers[id];
-    let strokeOut = 0, strokeIn = 0;
-    const scoreCells = rc.perHole.map(h => {
-      const v = h.scores[id];
-      if (v != null) { if (h.number <= 9) strokeOut += v; else strokeIn += v; }
+  if (round.type === 'scramble') {
+    // Scramble: one shared team score per hole, no per-player breakdown at all.
+    let teamOut = 0, teamIn = 0;
+    const teamCells = rc.perHole.map(h => {
+      const v = h.teamScore;
+      if (v != null) { if (h.number <= 9) teamOut += v; else teamIn += v; }
       const cls = scoreCategoryClass(v, h.par);
       return `<td class="score-cell ${cls} ${holeColClasses(course, h.number)}">${v != null ? v : '–'}</td>`;
     });
-    html += assembleRow(
-      `<td>${playerName(id)} <span class="toggle-caret">▾</span></td>`,
-      scoreCells, holeCount,
-      `<td class="out-col">${strokeOut || ''}</td>`, `<td class="in-col">${strokeIn || ''}</td>`, `<td class="total-col">${(strokeOut + strokeIn) || ''}</td>`,
-      `score-row player-toggle-row ${collapsed ? 'collapsed' : ''}`,
-      `data-toggle="${id}"`
-    );
+    html += assembleRow('<td>Team Score</td>', teamCells, holeCount,
+      `<td class="out-col">${teamOut || ''}</td>`, `<td class="in-col">${teamIn || ''}</td>`, `<td class="total-col">${(teamOut + teamIn) || ''}</td>`,
+      'score-row');
+  } else {
+    // Player rows
+    ids.forEach(id => {
+      const collapsed = !!collapsedPlayers[id];
+      let strokeOut = 0, strokeIn = 0;
+      const scoreCells = rc.perHole.map(h => {
+        const v = h.scores[id];
+        if (v != null) { if (h.number <= 9) strokeOut += v; else strokeIn += v; }
+        const cls = scoreCategoryClass(v, h.par);
+        return `<td class="score-cell ${cls} ${holeColClasses(course, h.number)}">${v != null ? v : '–'}</td>`;
+      });
+      html += assembleRow(
+        `<td>${playerName(id)} <span class="toggle-caret">▾</span></td>`,
+        scoreCells, holeCount,
+        `<td class="out-col">${strokeOut || ''}</td>`, `<td class="in-col">${strokeIn || ''}</td>`, `<td class="total-col">${(strokeOut + strokeIn) || ''}</td>`,
+        `score-row player-toggle-row ${collapsed ? 'collapsed' : ''}`,
+        `data-toggle="${id}"`
+      );
 
-    const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
-    const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
-    html += assembleRow('<td>Game Points</td>', gpCells, holeCount,
-      `<td class="out-col">${fmtOrBlank(gpOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(gpOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(gpOutIn.total)}</td>`,
-      `subrow ${collapsed ? 'hidden-row' : ''}`);
+      const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
+      const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
+      html += assembleRow('<td>Game Points</td>', gpCells, holeCount,
+        `<td class="out-col">${fmtOrBlank(gpOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(gpOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(gpOutIn.total)}</td>`,
+        `subrow ${collapsed ? 'hidden-row' : ''}`);
 
-    const sfOutIn = sumOutInTotal(rc.perHole, h => h.stableford[id]);
-    const sfCells = rc.perHole.map(h => { const v = h.stableford[id]; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
-    html += assembleRow('<td>Stableford Points</td>', sfCells, holeCount,
-      `<td class="out-col">${fmtOrBlank(sfOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(sfOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(sfOutIn.total)}</td>`,
-      `subrow ${collapsed ? 'hidden-row' : ''}`);
-  });
+      const sfOutIn = sumOutInTotal(rc.perHole, h => h.stableford[id]);
+      const sfCells = rc.perHole.map(h => { const v = h.stableford[id]; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
+      html += assembleRow('<td>Stableford Points</td>', sfCells, holeCount,
+        `<td class="out-col">${fmtOrBlank(sfOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(sfOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(sfOutIn.total)}</td>`,
+        `subrow ${collapsed ? 'hidden-row' : ''}`);
+    });
 
-  // Best Ball row (matchplay3 rounds only)
-  if (round.type === 'matchplay3') {
-    const bbOutIn = sumOutInTotal(rc.perHole, h => h.bestBall);
-    const bbCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${h.bestBall != null ? h.bestBall : ''}</td>`);
-    html += assembleRow(`<td>Best Ball (goal ${state.config.bestBallGoal})</td>`, bbCells, holeCount,
-      `<td class="out-col">${bbOutIn.out || ''}</td>`, `<td class="in-col">${bbOutIn.inn || ''}</td>`, `<td class="total-col">${bbOutIn.total || ''}</td>`,
-      'bestball-row');
-  }
+    // Best Ball row (matchplay3 rounds only)
+    if (round.type === 'matchplay3') {
+      const bbOutIn = sumOutInTotal(rc.perHole, h => h.bestBall);
+      const bbCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${h.bestBall != null ? h.bestBall : ''}</td>`);
+      html += assembleRow(`<td>Best Ball (goal ${state.config.bestBallGoal})</td>`, bbCells, holeCount,
+        `<td class="out-col">${bbOutIn.out || ''}</td>`, `<td class="in-col">${bbOutIn.inn || ''}</td>`, `<td class="total-col">${bbOutIn.total || ''}</td>`,
+        'bestball-row');
+    }
 
-  // Wolf indicator row (read-only — edit happens in Enter Score)
-  if (round.type === 'wolf') {
-    const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number)}</td>`);
-    html += assembleRow('<td>🐺 Wolf</td>', wCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
-  }
+    // Wolf indicator row (read-only — edit happens in Enter Score)
+    if (round.type === 'wolf') {
+      const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number)}</td>`);
+      html += assembleRow('<td>🐺 Wolf</td>', wCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    }
 
-  // 1-1-1 matchup indicator row (read-only)
-  if (round.type === '111') {
-    const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(rotatedPlayer(h.number, 0))}</td>`);
-    html += assembleRow('<td>Solo</td>', mCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    // 1-1-1 matchup indicator row (read-only)
+    if (round.type === '111') {
+      const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(rotatedPlayer(h.number, 0))}</td>`);
+      html += assembleRow('<td>Solo</td>', mCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    }
   }
 
   html += `</tbody></table></div>`;
 
-  const ctpOpts = `<option value="">— Select —</option>` + ids.map(id => `<option value="${id}" ${round.ctpWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
-  const ldOpts = `<option value="">— Select —</option>` + ids.map(id => `<option value="${id}" ${round.ldWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
-  html += `<div class="card ctpld-row">
-    <div class="field-row">
-      <div class="field"><label>Closest to the Pin Winner (Hole ${course.ctpHole})</label><select id="ctpWinnerSelect" ${editable ? '' : 'disabled'}>${ctpOpts}</select></div>
-      <div class="field"><label>Longest Drive Winner (Hole ${course.ldHole})</label><select id="ldWinnerSelect" ${editable ? '' : 'disabled'}>${ldOpts}</select></div>
-    </div>
-    ${editable ? '' : '<p class="helper-text">Log in from Settings to set the CTP/Drive winners.</p>'}
-  </div>`;
+  if (round.type === 'scramble') {
+    html += `<div class="card"><p class="helper-text" style="margin:0;">Scramble is just for fun — it doesn't count toward Stableford, game points, or the weekend leaderboard, and has no Closest to the Pin or Longest Drive.</p></div>`;
+  } else {
+    const ctpOpts = `<option value="">— Select —</option>` + ids.map(id => `<option value="${id}" ${round.ctpWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
+    const ldOpts = `<option value="">— Select —</option>` + ids.map(id => `<option value="${id}" ${round.ldWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
+    html += `<div class="card ctpld-row">
+      <div class="field-row">
+        <div class="field"><label>Closest to the Pin Winner (Hole ${course.ctpHole})</label><select id="ctpWinnerSelect" ${editable ? '' : 'disabled'}>${ctpOpts}</select></div>
+        <div class="field"><label>Longest Drive Winner (Hole ${course.ldHole})</label><select id="ldWinnerSelect" ${editable ? '' : 'disabled'}>${ldOpts}</select></div>
+      </div>
+      ${editable ? '' : '<p class="helper-text">Log in from Settings to set the CTP/Drive winners.</p>'}
+    </div>`;
+  }
 
   document.getElementById('roundContent').innerHTML = html;
 
@@ -840,6 +885,20 @@ function renderRoundsView() {
   const ldSel = document.getElementById('ldWinnerSelect');
   if (ctpSel) ctpSel.addEventListener('change', () => { round.ctpWinner = ctpSel.value || null; saveState(); renderLeaderboard(); });
   if (ldSel) ldSel.addEventListener('change', () => { round.ldWinner = ldSel.value || null; saveState(); renderLeaderboard(); });
+}
+
+// Regenerates the "Round 1 / Round 2 / ..." tab buttons for both the main
+// Scorecard view and the Enter Score modal, since the number of rounds is
+// now configurable instead of a fixed HTML trio.
+function renderRoundTabs() {
+  const el = document.getElementById('roundSegmented');
+  if (!el) return;
+  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${activeRoundTab === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
+}
+function renderModalRoundTabs() {
+  const el = document.getElementById('modalRoundSegmented');
+  if (!el) return;
+  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${modalRound === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
 }
 
 /* ---------------------------------------------------------------
@@ -891,6 +950,10 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
     const ldWinner = round.ldWinner ? playerName(round.ldWinner) : '';
     rc.perHole.forEach(h => {
       const note = gameNoteForHole(round, h);
+      if (round.type === 'scramble') {
+        rows.push([yearLabel, round.label, course.name, round.gameName, h.number, h.par, h.index, 'Team', h.teamScore != null ? h.teamScore : '', '', '', note, ctpWinner, ldWinner]);
+        return;
+      }
       ids.forEach(id => {
         rows.push([
           yearLabel, round.label, course.name, round.gameName, h.number, h.par, h.index,
@@ -985,7 +1048,7 @@ function renderStats() {
     html += statGroup('Daily Games', [
       ['Daily game wins', s.dailyWins]
     ]);
-    html += statGroup('3-Way Match Play', [
+    html += statGroup('Match Play', [
       ['Holes won', s.mp3Wins], ['Holes tied', s.mp3Ties]
     ]);
     html += statGroup('Wolf', [
@@ -1475,9 +1538,8 @@ function navigateSeason(dir) {
 function blankRoundsPreservingSettings() {
   return state.rounds.map((r, i) => {
     const holeCount = courseFor(i + 1).holeCount || 18;
-    const holes = {};
-    for (let n = 1; n <= holeCount; n++) holes[n] = r.type === 'wolf' ? Object.assign(emptyHoleData(), { wolf: { partner: 'lone' } }) : emptyHoleData();
-    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes, ctpWinner: null, ldWinner: null };
+    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null };
+    for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
     if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === 3) ? r.wolfOrder.slice() : playerIds();
     return fresh;
   });
@@ -1810,14 +1872,19 @@ function applyReadyGate() {
 /* ---------------------------------------------------------------
    RENDERING — MASTER SETTINGS
 ---------------------------------------------------------------- */
-const GAME_TYPE_LABELS = { matchplay3: '3-Way Match Play', wolf: 'Wolf', '111': '1-1-1' };
+const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', scramble: 'Scramble' };
 
 function courseCard(roundIdx, dis) {
   dis = dis || '';
   const c = courseFor(roundIdx);
   const round = state.rounds[roundIdx - 1];
-  const typeOpts = Object.entries(GAME_TYPE_LABELS).map(([val, label]) =>
-    `<option value="${val}" ${round.type === val ? 'selected' : ''}>${label}</option>`).join('');
+  // Wolf's tee-rotation math only works for exactly 3 players — hide it from
+  // the picker otherwise rather than let someone select a game that will
+  // silently misbehave.
+  const availableTypes = Object.keys(GAME_TYPE_LABELS).filter(t => t !== 'wolf' || state.config.players.length === 3);
+  const typeOpts = availableTypes.map(val =>
+    `<option value="${val}" ${round.type === val ? 'selected' : ''}>${GAME_TYPE_LABELS[val]}</option>`).join('');
+  const isScramble = round.type === 'scramble';
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
@@ -1827,10 +1894,11 @@ function courseCard(roundIdx, dis) {
       </select></div>
     </div>
     <div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>
+    ${isScramble ? `<p class="helper-text" style="margin:0 0 10px;">Scramble has no Closest to the Pin or Longest Drive — it's just for fun and never counts toward the leaderboard.</p>` : `
     <div class="field-row">
       <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
       <div class="field"><label>Longest Drive — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgLdHole" data-round="${roundIdx}" value="${c.ldHole}" ${dis}></div>
-    </div>
+    </div>`}
     <p class="eyebrow" style="margin-top:10px;">Pars &amp; Stroke Index</p>
     <div class="hole-grid">${c.holes.map((h, i) => `
       <div class="field hole-par-input">
@@ -1841,6 +1909,78 @@ function courseCard(roundIdx, dis) {
     </div>
     <p class="helper-text">Top box = par, bottom box = stroke index.</p>
   </div>`;
+}
+
+// If the player count isn't exactly 3, Wolf can't run (its tee-order math
+// is fixed to 3 players) — auto-convert any Wolf round to Match Play rather
+// than leave it silently broken.
+function enforceWolfPlayerConstraint() {
+  if (state.config.players.length === 3) return;
+  let changed = false;
+  state.rounds.forEach(r => {
+    if (r.type === 'wolf') {
+      r.type = 'matchplay3';
+      r.gameName = GAME_TYPE_LABELS['matchplay3'];
+      delete r.wolfOrder;
+      changed = true;
+    }
+  });
+  if (changed) showToast('Wolf requires exactly 3 players — affected rounds switched to Match Play');
+}
+
+function addPlayer() {
+  if (state.config.players.length >= MAX_PLAYERS) { showToast(`Maximum ${MAX_PLAYERS} players`); return; }
+  const n = state.config.players.length + 1;
+  const id = 'p' + n;
+  state.config.players.push({ id, name: `Player ${n}` });
+  state.rounds.forEach(r => { Object.values(r.holes).forEach(h => { if (!(id in h)) h[id] = null; }); });
+  enforceWolfPlayerConstraint();
+  saveState(); renderAll();
+}
+
+async function removeLastPlayer() {
+  if (state.config.players.length <= MIN_PLAYERS) { showToast(`Need at least ${MIN_PLAYERS} players`); return; }
+  const removed = state.config.players[state.config.players.length - 1];
+  if (!confirm(`Remove ${removed.name}? This deletes their scores from every round and unassigns anyone currently playing as them. This can't be undone.`)) return;
+  state.config.players.pop();
+  state.rounds.forEach(r => {
+    Object.values(r.holes).forEach(h => { delete h[removed.id]; });
+    if (r.wolfOrder) r.wolfOrder = r.wolfOrder.filter(id => id !== removed.id);
+    if (r.ctpWinner === removed.id) r.ctpWinner = null;
+    if (r.ldWinner === removed.id) r.ldWinner = null;
+  });
+  enforceWolfPlayerConstraint();
+  saveState(); renderAll();
+  // Best-effort: unassign any room member currently playing as the removed slot.
+  try {
+    const members = await fetchRoomMembers();
+    const affected = members.filter(m => m.playerId === removed.id);
+    for (const m of affected) {
+      await auth.client.rpc('admin_set_member_player', { p_room_id: auth.activeRoomId, p_user_id: m.userId, p_player_id: 'unassigned' });
+    }
+    if (affected.length) loadAndRenderMembers();
+  } catch (e) { console.warn('Could not clean up member assignments after removing a player', e); }
+}
+
+function addRound() {
+  if (state.rounds.length >= MAX_ROUNDS) { showToast(`Maximum ${MAX_ROUNDS} rounds`); return; }
+  const idx = state.rounds.length + 1;
+  state.config.courses.push(defaultCourse(`Round ${idx} Course`, 8, 13, 18));
+  const newRound = { id: idx, type: 'matchplay3', label: `Round ${idx}`, gameName: GAME_TYPE_LABELS['matchplay3'], holes: {}, ctpWinner: null, ldWinner: null };
+  for (let n = 1; n <= 18; n++) newRound.holes[n] = buildEmptyHole(newRound);
+  state.rounds.push(newRound);
+  saveState(); renderAll();
+}
+
+function removeLastRound() {
+  if (state.rounds.length <= MIN_ROUNDS) { showToast(`Need at least ${MIN_ROUNDS} round`); return; }
+  const idx = state.rounds.length;
+  if (!confirm(`Remove Round ${idx}? This permanently deletes all its scores. This can't be undone.`)) return;
+  state.rounds.pop();
+  state.config.courses.pop();
+  if (activeRoundTab > state.rounds.length) activeRoundTab = state.rounds.length;
+  if (modalRound > state.rounds.length) modalRound = state.rounds.length;
+  saveState(); renderAll();
 }
 
 function renderGameSettings() {
@@ -1868,10 +2008,17 @@ function renderGameSettings() {
     html += `<p class="helper-text">You have view-only access — these settings are read-only for you.</p>`;
   }
 
-  html += `<div class="card"><p class="eyebrow">Players</p>`;
+  html += `<div class="card"><p class="eyebrow">Players (${c.players.length})</p>`;
   c.players.forEach((p, i) => {
     html += `<div class="field"><label>Player ${i + 1} Name</label><input type="text" data-player-idx="${i}" class="cfgPlayerName" value="${escapeHtml(p.name)}" ${dis}></div>`;
   });
+  if (editable) {
+    html += `<div class="field-row">
+      <button class="btn btn-secondary" id="addPlayerBtn" style="flex:1;" ${c.players.length >= MAX_PLAYERS ? 'disabled' : ''}>+ Add Player</button>
+      <button class="btn btn-ghost" id="removePlayerBtn" style="flex:1;" ${c.players.length <= MIN_PLAYERS ? 'disabled' : ''}>− Remove Last</button>
+    </div>
+    ${c.players.length !== 3 ? '<p class="helper-text" style="margin-top:8px;">Wolf requires exactly 3 players and is hidden from the Game picker at this count.</p>' : ''}`;
+  }
   html += `</div>`;
 
   html += `<div class="card"><p class="eyebrow">Daily Game Points</p>
@@ -1930,7 +2077,15 @@ function renderGameSettings() {
     <div class="field"><label>Best Ball Score Goal</label><input type="number" id="cfgBestBallGoal" value="${c.bestBallGoal}" ${dis}></div>
   </div>`;
 
-  html += courseCard(1, dis) + courseCard(2, dis) + courseCard(3, dis);
+  html += state.rounds.map((r, i) => courseCard(i + 1, dis)).join('');
+  if (editable) {
+    html += `<div class="card"><p class="eyebrow">Rounds (${state.rounds.length})</p>
+      <div class="field-row">
+        <button class="btn btn-secondary" id="addRoundBtn" style="flex:1;" ${state.rounds.length >= MAX_ROUNDS ? 'disabled' : ''}>+ Add Round</button>
+        <button class="btn btn-ghost" id="removeRoundBtn" style="flex:1;" ${state.rounds.length <= MIN_ROUNDS ? 'disabled' : ''}>− Remove Last Round</button>
+      </div>
+    </div>`;
+  }
 
   el.innerHTML = html;
   const exportBtn = document.getElementById('exportCsvBtn');
@@ -1944,6 +2099,15 @@ function renderGameSettings() {
     });
   }
   if (!editable) return; // nothing below is interactive
+
+  const addPlayerBtn = document.getElementById('addPlayerBtn');
+  if (addPlayerBtn) addPlayerBtn.addEventListener('click', addPlayer);
+  const removePlayerBtn = document.getElementById('removePlayerBtn');
+  if (removePlayerBtn) removePlayerBtn.addEventListener('click', removeLastPlayer);
+  const addRoundBtn = document.getElementById('addRoundBtn');
+  if (addRoundBtn) addRoundBtn.addEventListener('click', addRound);
+  const removeRoundBtn = document.getElementById('removeRoundBtn');
+  if (removeRoundBtn) removeRoundBtn.addEventListener('click', removeLastRound);
 
   const bind = (id, path, isNum) => {
     const inp = document.getElementById(id);
@@ -1994,12 +2158,22 @@ function renderGameSettings() {
       const round = state.rounds[roundIdx - 1];
       const newType = sel.value;
       if (newType === round.type) return;
-      if (!confirm(`Change Round ${roundIdx} to ${GAME_TYPE_LABELS[newType]}? Existing strokes are kept, but game points will be recalculated under the new rules.`)) {
-        sel.value = round.type; return;
-      }
+      const switchingScramble = newType === 'scramble' || round.type === 'scramble';
+      const warnMsg = switchingScramble
+        ? `Change Round ${roundIdx} to ${GAME_TYPE_LABELS[newType]}? Scramble uses a different scorecard, so existing hole scores for this round will be cleared.`
+        : `Change Round ${roundIdx} to ${GAME_TYPE_LABELS[newType]}? Existing strokes are kept, but game points will be recalculated under the new rules.`;
+      if (!confirm(warnMsg)) { sel.value = round.type; return; }
       round.type = newType;
       round.gameName = GAME_TYPE_LABELS[newType];
+      if (switchingScramble) {
+        round.ctpWinner = null; round.ldWinner = null;
+        const holeCount = courseFor(roundIdx).holeCount || 18;
+        const holes = {};
+        for (let n = 1; n <= holeCount; n++) holes[n] = buildEmptyHole(round);
+        round.holes = holes;
+      }
       if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== 3)) round.wolfOrder = playerIds();
+      if (newType !== 'wolf') delete round.wolfOrder;
       saveState(); renderAll();
     });
   });
@@ -2165,8 +2339,12 @@ let modalRound = 1;
 let modalHole = 1;
 
 function firstUnenteredHole(round, holeCount) {
-  const ids = playerIds();
   const max = holeCount || 18;
+  if (round.type === 'scramble') {
+    for (let n = 1; n <= max; n++) { if (round.holes[n].team == null) return n; }
+    return null;
+  }
+  const ids = playerIds();
   for (let n = 1; n <= max; n++) {
     if (!allEntered(round.holes[n], ids)) return n;
   }
@@ -2178,8 +2356,9 @@ function openScoreModal() {
   let hole = firstUnenteredHole(state.rounds[round - 1], courseFor(round).holeCount);
   if (hole == null) {
     // this round is done — look for the next round (in order) with open holes
-    for (let i = 1; i <= 3; i++) {
-      const r = ((round - 1 + i) % 3) + 1;
+    const totalRounds = state.rounds.length;
+    for (let i = 1; i <= totalRounds; i++) {
+      const r = ((round - 1 + i) % totalRounds) + 1;
       const h = firstUnenteredHole(state.rounds[r - 1], courseFor(r).holeCount);
       if (h != null) { round = r; hole = h; break; }
     }
@@ -2188,7 +2367,6 @@ function openScoreModal() {
   modalRound = round;
   modalHole = hole;
   document.getElementById('scoreModal').classList.remove('hidden');
-  document.querySelectorAll('#modalRoundSegmented button').forEach(b => b.classList.toggle('active', Number(b.dataset.round) === modalRound));
 
   const gate = document.getElementById('modalLoginGate');
   const body = document.getElementById('modalScoreBody');
@@ -2199,6 +2377,7 @@ function openScoreModal() {
     else gateText.textContent = `You need to sign in and join or create a room before you can enter scores. Head to Settings → Account & Rooms.`;
     gate.style.display = 'block';
     body.style.display = 'none';
+    renderModalRoundTabs();
     return;
   }
   gate.style.display = 'none';
@@ -2217,7 +2396,6 @@ document.getElementById('modalRoundSegmented').addEventListener('click', (e) => 
   if (!btn) return;
   modalRound = Number(btn.dataset.round);
   modalHole = firstUnenteredHole(state.rounds[modalRound - 1], courseFor(modalRound).holeCount) ?? (courseFor(modalRound).holeCount || 18);
-  document.querySelectorAll('#modalRoundSegmented button').forEach(b => b.classList.toggle('active', Number(b.dataset.round) === modalRound));
   renderModalHole();
 });
 
@@ -2234,31 +2412,35 @@ function wolfChoiceLabel(round, n, value) {
 }
 
 function renderModalHole() {
+  renderModalRoundTabs();
   const round = state.rounds[modalRound - 1];
   const hd = round.holes[modalHole];
   const par = holeConfig(modalRound, modalHole).par;
   const ids = playerIds();
   const loggedInId = myPlayerId();
+  const isScramble = round.type === 'scramble';
 
   document.getElementById('modalRoundTitle').textContent = `${round.label} · ${round.gameName}`;
   document.getElementById('modalHoleNumber').textContent = `Hole ${modalHole}`;
   document.getElementById('modalHolePar').textContent = `Par ${par}`;
 
   const saveBtn = document.getElementById('saveHoleBtn');
-  const alreadyEntered = allEntered(hd, ids);
+  const alreadyEntered = isScramble ? (hd.team != null) : allEntered(hd, ids);
   saveBtn.textContent = alreadyEntered ? 'Edit Hole' : 'Save Hole';
   saveBtn.classList.toggle('btn-primary', !alreadyEntered);
   saveBtn.classList.toggle('btn-edit', alreadyEntered);
 
   const notice = document.getElementById('modalLoginNotice');
   notice.style.display = 'block';
-  notice.textContent = isAdmin()
-    ? `Admin mode — all strokes are editable.`
-    : state.config.openScoring
-      ? `Open scoring is on for this room — anyone can edit any player's strokes.`
-      : loggedInId
-        ? `Playing as ${playerName(loggedInId)} — only your strokes are editable.`
-        : `Pick which player you are in Account & Rooms to unlock your strokes.`;
+  notice.textContent = isScramble
+    ? (canEditAnyScore() ? `Scramble — enter the team's single score for the hole.` : `Sign in with edit access to enter the team score.`)
+    : isAdmin()
+      ? `Admin mode — all strokes are editable.`
+      : state.config.openScoring
+        ? `Open scoring is on for this room — anyone can edit any player's strokes.`
+        : loggedInId
+          ? `Playing as ${playerName(loggedInId)} — only your strokes are editable.`
+          : `Pick which player you are in Account & Rooms to unlock your strokes.`;
 
   // Wolf order block (hole 1, round 2 only)
   const wolfOrderBlock = document.getElementById('modalWolfOrderBlock');
@@ -2285,18 +2467,31 @@ function renderModalHole() {
   }
 
   const inputsDiv = document.getElementById('modalScoreInputs');
-  inputsDiv.innerHTML = ids.map(id => {
-    const val = hd[id] != null ? hd[id] : par;
-    const locked = !canEditPlayer(id);
-    return `<div class="score-input-row ${locked ? 'locked-row' : ''}">
-      <label>${playerName(id)}${loggedInId === id ? '<span class="you-badge">You</span>' : ''}</label>
+  if (isScramble) {
+    const val = hd.team != null ? hd.team : par;
+    const locked = !canEditAnyScore();
+    inputsDiv.innerHTML = `<div class="score-input-row ${locked ? 'locked-row' : ''}">
+      <label>Team Score</label>
       <div class="stepper">
-        <button type="button" class="stepDown" data-player="${id}" ${locked ? 'disabled' : ''}>−</button>
-        <input type="number" class="scoreVal" data-player="${id}" value="${val}" min="1" max="15" ${locked ? 'disabled' : ''}>
-        <button type="button" class="stepUp" data-player="${id}" ${locked ? 'disabled' : ''}>+</button>
+        <button type="button" class="stepDown" data-player="team" ${locked ? 'disabled' : ''}>−</button>
+        <input type="number" class="scoreVal" data-player="team" value="${val}" min="1" max="20" ${locked ? 'disabled' : ''}>
+        <button type="button" class="stepUp" data-player="team" ${locked ? 'disabled' : ''}>+</button>
       </div>
     </div>`;
-  }).join('');
+  } else {
+    inputsDiv.innerHTML = ids.map(id => {
+      const val = hd[id] != null ? hd[id] : par;
+      const locked = !canEditPlayer(id);
+      return `<div class="score-input-row ${locked ? 'locked-row' : ''}">
+        <label>${playerName(id)}${loggedInId === id ? '<span class="you-badge">You</span>' : ''}</label>
+        <div class="stepper">
+          <button type="button" class="stepDown" data-player="${id}" ${locked ? 'disabled' : ''}>−</button>
+          <input type="number" class="scoreVal" data-player="${id}" value="${val}" min="1" max="15" ${locked ? 'disabled' : ''}>
+          <button type="button" class="stepUp" data-player="${id}" ${locked ? 'disabled' : ''}>+</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
 
   inputsDiv.querySelectorAll('.stepDown').forEach(b => b.addEventListener('click', () => stepScore(b.dataset.player, -1)));
   inputsDiv.querySelectorAll('.stepUp').forEach(b => b.addEventListener('click', () => stepScore(b.dataset.player, 1)));
@@ -2339,8 +2534,14 @@ function stepScore(playerId, delta) {
 }
 
 function readModalTempHole() {
-  const ids = playerIds();
+  const round = state.rounds[modalRound - 1];
   const temp = {};
+  if (round.type === 'scramble') {
+    const inp = document.querySelector(`.scoreVal[data-player="team"]`);
+    temp.team = inp ? Number(inp.value) : null;
+    return temp;
+  }
+  const ids = playerIds();
   ids.forEach(id => {
     const inp = document.querySelector(`.scoreVal[data-player="${id}"]`);
     temp[id] = inp ? Number(inp.value) : null;
@@ -2356,12 +2557,17 @@ function renderModalPreview() {
   const resultBlock = document.getElementById('modalAutoResultBlock');
   const resultTitle = document.getElementById('modalAutoResultTitle');
   const resultText = document.getElementById('modalAutoResultText');
+
+  if (round.type === 'scramble') {
+    resultBlock.style.display = 'none';
+    return;
+  }
   resultBlock.style.display = 'block';
 
   if (round.type === 'matchplay3') {
     resultTitle.textContent = 'Match Play Result';
     const pts = matchPlayHolePoints(temp, playerIds());
-    if (!pts) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    if (!pts) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     const parts = playerIds().map(id => `${playerName(id)}: ${fmtNum(pts[id])} pt${pts[id] === 1 ? '' : 's'}`);
     resultText.textContent = parts.join(' · ');
   } else if (round.type === 'wolf') {
@@ -2375,7 +2581,7 @@ function renderModalPreview() {
   } else if (round.type === '111') {
     resultTitle.textContent = '1-1-1 Result';
     const o = oneOneOneHolePoints(temp, modalHole);
-    if (!o) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    if (!o) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     if (o.outcome === 'solo-win') resultText.textContent = `${playerName(o.soloPlayer)} wins solo (+${state.config.oneOneOne.soloWin}).`;
     else if (o.outcome === 'team-win') resultText.textContent = `${o.teamIds.map(playerName).join(' & ')} win as a team (+${state.config.oneOneOne.teamWin} each).`;
     else resultText.textContent = 'Hole tied — no points awarded.';
@@ -2386,11 +2592,15 @@ document.getElementById('saveHoleBtn').addEventListener('click', () => {
   const round = state.rounds[modalRound - 1];
   const temp = readModalTempHole();
   const holeData = round.holes[modalHole];
-  playerIds().forEach(id => {
-    if (!canEditPlayer(id)) return;
-    holeData[id] = temp[id];
-  });
-  if (round.type === 'wolf' && temp.wolf) holeData.wolf = temp.wolf;
+  if (round.type === 'scramble') {
+    if (canEditAnyScore()) holeData.team = temp.team;
+  } else {
+    playerIds().forEach(id => {
+      if (!canEditPlayer(id)) return;
+      holeData[id] = temp[id];
+    });
+    if (round.type === 'wolf' && temp.wolf) holeData.wolf = temp.wolf;
+  }
   saveState();
   renderRoundsView();
   renderLeaderboard();
