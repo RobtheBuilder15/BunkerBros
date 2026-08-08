@@ -1234,6 +1234,23 @@ async function enterRoomAsGod(roomId, name, roomCode) {
   await selectRoom(roomId);
 }
 
+// Fired when *any* row in this room's room_memberships changes — covers
+// an admin changing someone's role/Bro, a member being removed, or the
+// same account editing its own row from a different device/tab. Refetches
+// from Supabase so auth.rooms (and therefore myRole()/myPlayerId()) can
+// never drift from what's actually in the table.
+async function handleMembershipChange() {
+  if (!auth.activeRoomId || !auth.client) return;
+  await loadMyRooms();
+  if (!isGodOverrideRoom() && !auth.rooms.some(r => r.id === auth.activeRoomId)) {
+    // Our own membership row is gone — we were removed from this room.
+    showToast('You were removed from this room');
+    switchRoomView();
+    return;
+  }
+  renderAll();
+}
+
 async function selectRoom(roomId) {
   if (cloudSync.channel) { auth.client.removeChannel(cloudSync.channel); cloudSync.channel = null; }
   editorPinUnlocked = false;
@@ -1251,6 +1268,8 @@ async function selectRoom(roomId) {
     .channel('room-' + roomId)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
       (payload) => { if (payload.new) applyRemoteRoomRow(payload.new); })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'room_memberships', filter: `room_id=eq.${roomId}` },
+      () => { handleMembershipChange(); })
     .subscribe();
 
   renderAll();
