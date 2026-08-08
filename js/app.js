@@ -211,15 +211,18 @@ function saveState() {
 /* ---------------------------------------------------------------
    PERMISSIONS
 ---------------------------------------------------------------- */
+// True only when the currently-open room is the one explicitly entered via
+// the God Panel's "Open as Admin" button — not merely "I have no real
+// membership row here" (that check previously meant God Mode silently did
+// nothing whenever the super admin *also* happened to be a real member of
+// the target room, since activeMembership() would find that real row first).
+function isGodOverrideRoom() { return !!auth.godOverrideRoomId && auth.activeRoomId === auth.godOverrideRoomId; }
 function activeMembership() {
-  const real = auth.rooms.find(r => r.id === auth.activeRoomId);
-  if (real) return real;
-  if (auth.isSuperAdmin && auth.activeRoomId && auth.activeRoomId === auth.godOverrideRoomId) {
+  if (auth.isSuperAdmin && isGodOverrideRoom()) {
     return { id: auth.activeRoomId, player_id: null, role: 'admin' };
   }
-  return null;
+  return auth.rooms.find(r => r.id === auth.activeRoomId) || null;
 }
-function isGodOverrideRoom() { return !auth.rooms.some(r => r.id === auth.activeRoomId) && !!auth.godOverrideRoomId; }
 function myPlayerId() { const m = activeMembership(); return m ? m.player_id : null; }
 function myRole() { const m = activeMembership(); return m ? (m.role || 'editor') : null; }
 function isAdmin() { return myRole() === 'admin'; }
@@ -1231,7 +1234,7 @@ async function leaveRoom(roomId, wasActive) {
 async function enterRoomAsGod(roomId, name, roomCode) {
   auth.godOverrideRoomId = roomId;
   auth.godOverrideRoomMeta = { id: roomId, name, room_code: roomCode };
-  await selectRoom(roomId);
+  await selectRoom(roomId, true);
 }
 
 // Fired when *any* row in this room's room_memberships changes — covers
@@ -1251,10 +1254,15 @@ async function handleMembershipChange() {
   renderAll();
 }
 
-async function selectRoom(roomId) {
+async function selectRoom(roomId, viaGodMode) {
   if (cloudSync.channel) { auth.client.removeChannel(cloudSync.channel); cloudSync.channel = null; }
   editorPinUnlocked = false;
   liveRoomState = null; viewingSeasonKey = null;
+  // Only entering via the God Panel should grant the admin override — any
+  // other way of opening a room (your own room list, join/create, restoring
+  // your last session) should not silently inherit a stale override from an
+  // earlier God Mode visit to this same room.
+  if (!viaGodMode) { auth.godOverrideRoomId = null; auth.godOverrideRoomMeta = null; }
   auth.activeRoomId = roomId;
   localStorage.setItem(ACTIVE_ROOM_KEY, roomId);
 
