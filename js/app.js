@@ -75,14 +75,47 @@ updateKeyboardState();
 /* ---------------------------------------------------------------
    DEFAULT STATE
 ---------------------------------------------------------------- */
-function defaultHoles() {
+function defaultHoles(count) {
   const pars = [4,4,3,4,4,4,4,3,5, 4,3,4,5,3,4,5,4,4];
   const idx  = [1,7,6,14,8,9,2,18,17, 11,13,3,5,10,16,4,12,15];
-  return pars.map((par, i) => ({ number: i + 1, par, index: idx[i] }));
+  const n = count || 18;
+  return pars.slice(0, n).map((par, i) => ({ number: i + 1, par, index: idx[i] }));
 }
 
-function defaultCourse(name, ctpHole, ldHole) {
-  return { name, holes: defaultHoles(), ctpHole, ldHole };
+function defaultCourse(name, ctpHole, ldHole, holeCount) {
+  const n = holeCount || 18;
+  return { name, holes: defaultHoles(n), ctpHole, ldHole, holeCount: n };
+}
+
+// Resize a course's hole array (par/index) to a new hole count, preserving
+// existing holes and filling new ones from the standard pattern.
+function resizeCourseHoles(course, newCount) {
+  if (newCount === course.holes.length) { course.holeCount = newCount; return; }
+  if (newCount > course.holes.length) {
+    const defaults = defaultHoles(18);
+    for (let n = course.holes.length + 1; n <= newCount; n++) {
+      const def = defaults.find(h => h.number === n) || { number: n, par: 4, index: n };
+      course.holes.push({ number: n, par: def.par, index: def.index });
+    }
+  } else {
+    course.holes = course.holes.filter(h => h.number <= newCount);
+  }
+  course.holeCount = newCount;
+  if (course.ctpHole > newCount) course.ctpHole = newCount;
+  if (course.ldHole > newCount) course.ldHole = newCount;
+}
+
+// Resize a round's holes data object (scores) to match a new hole count.
+function resizeRoundHoles(round, newCount) {
+  const holes = round.holes;
+  const currentMax = Math.max(0, ...Object.keys(holes).map(Number));
+  if (newCount > currentMax) {
+    for (let n = 1; n <= newCount; n++) {
+      if (!holes[n]) holes[n] = round.type === 'wolf' ? Object.assign(emptyHoleData(), { wolf: { partner: 'lone' } }) : emptyHoleData();
+    }
+  } else {
+    Object.keys(holes).forEach(k => { if (Number(k) > newCount) delete holes[k]; });
+  }
 }
 
 function defaultConfig() {
@@ -144,6 +177,8 @@ function loadRoomCache(roomId) {
         if (!parsed.year) parsed.year = String(new Date().getFullYear());
         if (!parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
         if (parsed.config.openScoring == null) parsed.config.openScoring = false;
+        if (parsed.config.courses) parsed.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+        (parsed.archivedSeasons || []).forEach(s => { if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; }); });
         parsed.unlocked = false;
         return parsed;
       }
@@ -217,7 +252,11 @@ function playerName(id) {
   return p ? p.name : id;
 }
 function initial(id) { return (playerName(id)[0] || '?').toUpperCase(); }
-function courseFor(roundIdx) { return state.config.courses[roundIdx - 1]; }
+function courseFor(roundIdx) {
+  const c = state.config.courses[roundIdx - 1];
+  if (c && !c.holeCount) c.holeCount = c.holes ? c.holes.length : 18;
+  return c;
+}
 function holeConfig(roundIdx, n) {
   const c = courseFor(roundIdx);
   return (c.holes.find(h => h.number === n)) || { number: n, par: 4, index: n };
@@ -350,8 +389,9 @@ function computeRound(round, roundIdx) {
   const strokeTotals = {}; ids.forEach(id => strokeTotals[id] = 0);
   let bestBallTotal = 0, bestBallHolesCounted = 0;
   let holesComplete = 0;
+  const holeCount = courseFor(roundIdx).holeCount || 18;
 
-  for (let n = 1; n <= 18; n++) {
+  for (let n = 1; n <= holeCount; n++) {
     const hd = round.holes[n];
     const hc = holeConfig(roundIdx, n);
     const par = hc.par;
@@ -389,7 +429,7 @@ function computeRound(round, roundIdx) {
   }
 
   const dailyAwards = holesComplete > 0 ? computeDailyAwards(rawGameTotals) : Object.fromEntries(ids.map(id => [id, 0]));
-  const finalized = holesComplete === 18;
+  const finalized = holesComplete === holeCount;
 
   return { perHole, rawGameTotals, stablefordTotals, strokeTotals, dailyAwards, bestBallTotal, bestBallHolesCounted, holesComplete, finalized };
 }
@@ -454,17 +494,23 @@ function computeStats(computed) {
 
   state.rounds.forEach((round, ri) => {
     const rc = computed.rounds[ri];
+    // "Best round score" and "most Stableford in a round" only make sense
+    // comparing like-for-like — a 9-hole round can't fairly beat/lose to an
+    // 18-hole one, so those rounds are skipped for these two stats only.
+    const fullRound = (courseFor(ri + 1).holeCount || 18) === 18;
 
-    ids.forEach(id => {
-      const st = rc.strokeTotals[id];
-      if (st > 0 && (stats[id].bestRoundScore == null || st < stats[id].bestRoundScore)) {
-        stats[id].bestRoundScore = st; stats[id].bestRoundLabel = round.label;
-      }
-      const sf = rc.stablefordTotals[id];
-      if (stats[id].mostStablefordInRound == null || sf > stats[id].mostStablefordInRound) {
-        stats[id].mostStablefordInRound = sf; stats[id].mostStablefordLabel = round.label;
-      }
-    });
+    if (fullRound) {
+      ids.forEach(id => {
+        const st = rc.strokeTotals[id];
+        if (st > 0 && (stats[id].bestRoundScore == null || st < stats[id].bestRoundScore)) {
+          stats[id].bestRoundScore = st; stats[id].bestRoundLabel = round.label;
+        }
+        const sf = rc.stablefordTotals[id];
+        if (stats[id].mostStablefordInRound == null || sf > stats[id].mostStablefordInRound) {
+          stats[id].mostStablefordInRound = sf; stats[id].mostStablefordLabel = round.label;
+        }
+      });
+    }
 
     rc.perHole.forEach(h => {
       ids.forEach(id => {
@@ -541,14 +587,15 @@ function renderRoundStatus() {
   const round = state.rounds[currentIdx];
   const rc = computed.rounds[currentIdx];
   const course = courseFor(currentIdx + 1);
+  const holeCount = course.holeCount || 18;
   const isDone = rc.finalized;
-  const pct = Math.round((rc.holesComplete / 18) * 100);
+  const pct = Math.round((rc.holesComplete / holeCount) * 100);
 
   const html = `<div class="status-widget">
     <div class="status-row ${isDone ? '' : 'active-round'} ${isDone ? 'done' : ''}">
       <div class="status-name">${round.label}<span class="status-course">${escapeHtml(course.name)}</span></div>
       <div class="status-track"><div class="status-fill" style="width:${pct}%"></div></div>
-      <div class="status-frac">${isDone ? '<span class="status-check">✓</span> Done' : `${rc.holesComplete}/18`}</div>
+      <div class="status-frac">${isDone ? '<span class="status-check">✓</span> Done' : `${rc.holesComplete}/${holeCount}`}</div>
     </div>
   </div>`;
   document.getElementById('roundStatusWidget').innerHTML = html;
@@ -644,12 +691,17 @@ function renderLeaderboard() {
 let activeRoundTab = 1;
 let collapsedPlayers = {};
 
-function assembleRow(labelHtml, cells18, outHtml, inHtml, totalHtml, rowClass, extraAttrs) {
+function assembleRow(labelHtml, cellsN, holeCount, outHtml, inHtml, totalHtml, rowClass, extraAttrs) {
   let html = `<tr class="${rowClass || ''}" ${extraAttrs || ''}>${labelHtml}`;
-  for (let i = 0; i < 9; i++) html += cells18[i];
-  html += outHtml;
-  for (let i = 9; i < 18; i++) html += cells18[i];
-  html += inHtml + totalHtml;
+  if (holeCount === 18) {
+    for (let i = 0; i < 9; i++) html += cellsN[i];
+    html += outHtml;
+    for (let i = 9; i < 18; i++) html += cellsN[i];
+    html += inHtml + totalHtml;
+  } else {
+    for (let i = 0; i < holeCount; i++) html += cellsN[i];
+    html += totalHtml;
+  }
   html += '</tr>';
   return html;
 }
@@ -682,28 +734,32 @@ function renderRoundsView() {
   const rc = computed.rounds[activeRoundTab - 1];
   const ids = playerIds();
   const course = courseFor(activeRoundTab);
+  const holeCount = course.holeCount || 18;
   const editable = canEditAnyScore();
 
-  const holesArr = []; for (let n = 1; n <= 18; n++) holesArr.push(n);
+  const holesArr = []; for (let n = 1; n <= holeCount; n++) holesArr.push(n);
 
   let html = `<div class="scorecard-scroll"><table class="scorecard"><thead>`;
 
-  // course / game title row
-  html += `<tr class="card-title-row"><td colspan="11" class="title-left">${escapeHtml(course.name)}</td><td colspan="11" class="title-right">${round.gameName}</td></tr>`;
+  // course / game title row — colspan split scales with column count so the
+  // title bar still spans the full width whether this is a 9- or 18-hole card
+  const totalCols = holeCount === 18 ? 22 : (holeCount + 2);
+  const leftSpan = Math.ceil(totalCols / 2), rightSpan = totalCols - leftSpan;
+  html += `<tr class="card-title-row"><td colspan="${leftSpan}" class="title-left">${escapeHtml(course.name)}</td><td colspan="${rightSpan}" class="title-right">${round.gameName}</td></tr>`;
 
   // hole numbers header row
   const headerCells = holesArr.map(n => `<th class="${holeColClasses(course, n)}">${n}</th>`);
-  html += assembleRow('<th>Hole</th>', headerCells, '<th class="out-col">Out</th>', '<th class="in-col">In</th>', '<th class="total-col">Total</th>', 'hole-header');
+  html += assembleRow('<th>Hole</th>', headerCells, holeCount, '<th class="out-col">Out</th>', '<th class="in-col">In</th>', '<th class="total-col">Total</th>', 'hole-header');
   html += `</thead><tbody>`;
 
   // Par row
   let parOut = 0, parIn = 0;
   const parCells = holesArr.map(n => { const par = holeConfig(activeRoundTab, n).par; if (n <= 9) parOut += par; else parIn += par; return `<td class="${holeColClasses(course, n)}">${par}</td>`; });
-  html += assembleRow('<td>Par</td>', parCells, `<td class="out-col">${parOut}</td>`, `<td class="in-col">${parIn}</td>`, `<td class="total-col">${parOut + parIn}</td>`, 'par-row');
+  html += assembleRow('<td>Par</td>', parCells, holeCount, `<td class="out-col">${parOut}</td>`, `<td class="in-col">${parIn}</td>`, `<td class="total-col">${parOut + parIn}</td>`, 'par-row');
 
   // Index row
   const idxCells = holesArr.map(n => `<td class="${holeColClasses(course, n)}">${holeConfig(activeRoundTab, n).index}</td>`);
-  html += assembleRow('<td>Index</td>', idxCells, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'index-row');
+  html += assembleRow('<td>Index</td>', idxCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'index-row');
 
   // Player rows
   ids.forEach(id => {
@@ -717,7 +773,7 @@ function renderRoundsView() {
     });
     html += assembleRow(
       `<td>${playerName(id)} <span class="toggle-caret">▾</span></td>`,
-      scoreCells,
+      scoreCells, holeCount,
       `<td class="out-col">${strokeOut || ''}</td>`, `<td class="in-col">${strokeIn || ''}</td>`, `<td class="total-col">${(strokeOut + strokeIn) || ''}</td>`,
       `score-row player-toggle-row ${collapsed ? 'collapsed' : ''}`,
       `data-toggle="${id}"`
@@ -725,36 +781,36 @@ function renderRoundsView() {
 
     const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
     const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
-    html += assembleRow('<td>Game Points</td>', gpCells,
+    html += assembleRow('<td>Game Points</td>', gpCells, holeCount,
       `<td class="out-col">${fmtOrBlank(gpOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(gpOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(gpOutIn.total)}</td>`,
       `subrow ${collapsed ? 'hidden-row' : ''}`);
 
     const sfOutIn = sumOutInTotal(rc.perHole, h => h.stableford[id]);
     const sfCells = rc.perHole.map(h => { const v = h.stableford[id]; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
-    html += assembleRow('<td>Stableford Points</td>', sfCells,
+    html += assembleRow('<td>Stableford Points</td>', sfCells, holeCount,
       `<td class="out-col">${fmtOrBlank(sfOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(sfOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(sfOutIn.total)}</td>`,
       `subrow ${collapsed ? 'hidden-row' : ''}`);
   });
 
-  // Best Ball row (round 1 only)
+  // Best Ball row (matchplay3 rounds only)
   if (round.type === 'matchplay3') {
     const bbOutIn = sumOutInTotal(rc.perHole, h => h.bestBall);
     const bbCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${h.bestBall != null ? h.bestBall : ''}</td>`);
-    html += assembleRow(`<td>Best Ball (goal ${state.config.bestBallGoal})</td>`, bbCells,
+    html += assembleRow(`<td>Best Ball (goal ${state.config.bestBallGoal})</td>`, bbCells, holeCount,
       `<td class="out-col">${bbOutIn.out || ''}</td>`, `<td class="in-col">${bbOutIn.inn || ''}</td>`, `<td class="total-col">${bbOutIn.total || ''}</td>`,
       'bestball-row');
   }
 
-  // Wolf indicator row (round 2, read-only — edit happens in Enter Score)
+  // Wolf indicator row (read-only — edit happens in Enter Score)
   if (round.type === 'wolf') {
     const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number)}</td>`);
-    html += assembleRow('<td>🐺 Wolf</td>', wCells, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    html += assembleRow('<td>🐺 Wolf</td>', wCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
   }
 
   // 1-1-1 matchup indicator row (read-only)
   if (round.type === '111') {
     const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(rotatedPlayer(h.number, 0))}</td>`);
-    html += assembleRow('<td>Solo</td>', mCells, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    html += assembleRow('<td>Solo</td>', mCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
   }
 
   html += `</tbody></table></div>`;
@@ -1216,6 +1272,8 @@ function switchRoomView() {
 
 function applyRemoteRoomRow(row) {
   cloudSync.applyingRemote = true;
+  if (row.config && row.config.courses) row.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+  (row.archived_seasons || []).forEach(s => { if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; }); });
   const target = isViewingLive() ? state : liveRoomState;
   if (target) {
     target.config = row.config;
@@ -1384,11 +1442,25 @@ function navigateSeason(dir) {
   renderAll();
 }
 
+// Blank out all rounds for a new season while keeping each round's chosen
+// game type and hole count (those live on state.config/state.rounds and
+// would otherwise silently revert to the 3-way/wolf/1-1-1, 18-hole defaults).
+function blankRoundsPreservingSettings() {
+  return state.rounds.map((r, i) => {
+    const holeCount = courseFor(i + 1).holeCount || 18;
+    const holes = {};
+    for (let n = 1; n <= holeCount; n++) holes[n] = r.type === 'wolf' ? Object.assign(emptyHoleData(), { wolf: { partner: 'lone' } }) : emptyHoleData();
+    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes, ctpWinner: null, ldWinner: null };
+    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === 3) ? r.wolfOrder.slice() : playerIds();
+    return fresh;
+  });
+}
+
 async function archiveAndStartNewYear(newYearLabel) {
   state.archivedSeasons.push({ year: state.year, config: JSON.parse(JSON.stringify(state.config)), rounds: JSON.parse(JSON.stringify(state.rounds)), archivedAt: Date.now() });
   const oldYear = state.year;
   state.year = newYearLabel;
-  state.rounds = defaultRounds();
+  state.rounds = blankRoundsPreservingSettings();
   saveState();
   renderAll();
   showToast(`Archived ${oldYear} — welcome to ${newYearLabel}!`);
@@ -1711,14 +1783,26 @@ function applyReadyGate() {
 /* ---------------------------------------------------------------
    RENDERING — MASTER SETTINGS
 ---------------------------------------------------------------- */
+const GAME_TYPE_LABELS = { matchplay3: '3-Way Match Play', wolf: 'Wolf', '111': '1-1-1' };
+
 function courseCard(roundIdx, dis) {
   dis = dis || '';
   const c = courseFor(roundIdx);
-  return `<div class="card"><p class="eyebrow">Round ${roundIdx} Course</p>
+  const round = state.rounds[roundIdx - 1];
+  const typeOpts = Object.entries(GAME_TYPE_LABELS).map(([val, label]) =>
+    `<option value="${val}" ${round.type === val ? 'selected' : ''}>${label}</option>`).join('');
+  return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
+    <div class="field-row">
+      <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
+      <div class="field"><label>Holes</label><select class="cfgRoundHoles" data-round="${roundIdx}" ${dis}>
+        <option value="9" ${c.holeCount === 9 ? 'selected' : ''}>9 Holes</option>
+        <option value="18" ${c.holeCount === 18 ? 'selected' : ''}>18 Holes</option>
+      </select></div>
+    </div>
     <div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>
     <div class="field-row">
-      <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="18" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
-      <div class="field"><label>Longest Drive — Hole #</label><input type="number" min="1" max="18" class="cfgLdHole" data-round="${roundIdx}" value="${c.ldHole}" ${dis}></div>
+      <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
+      <div class="field"><label>Longest Drive — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgLdHole" data-round="${roundIdx}" value="${c.ldHole}" ${dis}></div>
     </div>
     <p class="eyebrow" style="margin-top:10px;">Pars &amp; Stroke Index</p>
     <div class="hole-grid">${c.holes.map((h, i) => `
@@ -1864,10 +1948,50 @@ function renderGameSettings() {
     inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).name = inp.value; saveState(); renderAll(); });
   });
   el.querySelectorAll('.cfgCtpHole').forEach(inp => {
-    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).ctpHole = Number(inp.value); saveState(); renderAll(); });
+    inp.addEventListener('change', () => {
+      const course = courseFor(Number(inp.dataset.round));
+      course.ctpHole = Math.min(Math.max(1, Number(inp.value) || 1), course.holeCount || 18);
+      saveState(); renderAll();
+    });
   });
   el.querySelectorAll('.cfgLdHole').forEach(inp => {
-    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).ldHole = Number(inp.value); saveState(); renderAll(); });
+    inp.addEventListener('change', () => {
+      const course = courseFor(Number(inp.dataset.round));
+      course.ldHole = Math.min(Math.max(1, Number(inp.value) || 1), course.holeCount || 18);
+      saveState(); renderAll();
+    });
+  });
+  el.querySelectorAll('.cfgRoundType').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const roundIdx = Number(sel.dataset.round);
+      const round = state.rounds[roundIdx - 1];
+      const newType = sel.value;
+      if (newType === round.type) return;
+      if (!confirm(`Change Round ${roundIdx} to ${GAME_TYPE_LABELS[newType]}? Existing strokes are kept, but game points will be recalculated under the new rules.`)) {
+        sel.value = round.type; return;
+      }
+      round.type = newType;
+      round.gameName = GAME_TYPE_LABELS[newType];
+      if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== 3)) round.wolfOrder = playerIds();
+      saveState(); renderAll();
+    });
+  });
+  el.querySelectorAll('.cfgRoundHoles').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const roundIdx = Number(sel.dataset.round);
+      const newCount = Number(sel.value);
+      const course = courseFor(roundIdx);
+      const round = state.rounds[roundIdx - 1];
+      if (newCount === course.holeCount) return;
+      if (newCount < course.holeCount) {
+        if (!confirm(`Switching Round ${roundIdx} to 9 holes will permanently delete any entered scores for holes 10–18. Continue?`)) {
+          sel.value = course.holeCount; return;
+        }
+      }
+      resizeCourseHoles(course, newCount);
+      resizeRoundHoles(round, newCount);
+      saveState(); renderAll();
+    });
   });
   el.querySelectorAll('.cfgHolePar').forEach(inp => {
     inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).holes[Number(inp.dataset.holeIdx)].par = Number(inp.value); saveState(); renderAll(); });
@@ -2013,9 +2137,10 @@ document.getElementById('roundSegmented').addEventListener('click', (e) => {
 let modalRound = 1;
 let modalHole = 1;
 
-function firstUnenteredHole(round) {
+function firstUnenteredHole(round, holeCount) {
   const ids = playerIds();
-  for (let n = 1; n <= 18; n++) {
+  const max = holeCount || 18;
+  for (let n = 1; n <= max; n++) {
     if (!allEntered(round.holes[n], ids)) return n;
   }
   return null; // this round is fully complete
@@ -2023,15 +2148,15 @@ function firstUnenteredHole(round) {
 
 function openScoreModal() {
   let round = activeRoundTab;
-  let hole = firstUnenteredHole(state.rounds[round - 1]);
+  let hole = firstUnenteredHole(state.rounds[round - 1], courseFor(round).holeCount);
   if (hole == null) {
     // this round is done — look for the next round (in order) with open holes
     for (let i = 1; i <= 3; i++) {
       const r = ((round - 1 + i) % 3) + 1;
-      const h = firstUnenteredHole(state.rounds[r - 1]);
+      const h = firstUnenteredHole(state.rounds[r - 1], courseFor(r).holeCount);
       if (h != null) { round = r; hole = h; break; }
     }
-    if (hole == null) hole = 18; // every round is fully complete — just show something
+    if (hole == null) hole = courseFor(round).holeCount || 18; // every round is fully complete — just show something
   }
   modalRound = round;
   modalHole = hole;
@@ -2064,13 +2189,13 @@ document.getElementById('modalRoundSegmented').addEventListener('click', (e) => 
   const btn = e.target.closest('button[data-round]');
   if (!btn) return;
   modalRound = Number(btn.dataset.round);
-  modalHole = firstUnenteredHole(state.rounds[modalRound - 1]) ?? 18;
+  modalHole = firstUnenteredHole(state.rounds[modalRound - 1], courseFor(modalRound).holeCount) ?? (courseFor(modalRound).holeCount || 18);
   document.querySelectorAll('#modalRoundSegmented button').forEach(b => b.classList.toggle('active', Number(b.dataset.round) === modalRound));
   renderModalHole();
 });
 
 document.getElementById('prevHoleBtn').addEventListener('click', () => { if (modalHole > 1) { modalHole--; renderModalHole(); } });
-document.getElementById('nextHoleBtn').addEventListener('click', () => { if (modalHole < 18) { modalHole++; renderModalHole(); } });
+document.getElementById('nextHoleBtn').addEventListener('click', () => { const max = courseFor(modalRound).holeCount || 18; if (modalHole < max) { modalHole++; renderModalHole(); } });
 
 function wolfChoiceLabel(round, n, value) {
   const { wolf, first, second } = getWolfOrderForHole(round, n);
@@ -2244,12 +2369,13 @@ document.getElementById('saveHoleBtn').addEventListener('click', () => {
   renderLeaderboard();
   renderRoundStatus();
   renderStats();
-  if (modalHole < 18) {
+  const maxHole = courseFor(modalRound).holeCount || 18;
+  if (modalHole < maxHole) {
     modalHole++;
     renderModalHole();
     showToast(`Hole ${modalHole - 1} saved`);
   } else {
-    showToast('Hole 18 saved — round complete!');
+    showToast(`Hole ${maxHole} saved — round complete!`);
     closeScoreModal();
   }
 });
