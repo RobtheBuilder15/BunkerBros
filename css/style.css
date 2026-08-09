@@ -150,6 +150,21 @@ body {
 .section-title { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; margin: 4px 0 12px; display: flex; align-items: center; justify-content: space-between; }
 .eyebrow { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sand-line); margin: 0 0 2px; }
 
+/* Year indicator badge, shown top-right of a section-title (e.g. across
+   from "Scorecard" on the Scorecard tab) */
+.year-indicator {
+  font-family: var(--font-body);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: var(--sand);
+  border: 1.5px solid rgba(28,61,46,0.18);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
 .sand-divider {
   height: 10px; border-radius: 999px;
   background: linear-gradient(90deg, var(--sand), var(--cream-deep));
@@ -170,6 +185,14 @@ body {
 .status-row.active-round { border-color: var(--tan-dark); background: linear-gradient(135deg, #FFFCF2, var(--sand) 260%); }
 .status-row .status-name { font-weight: 700; font-size: 0.86rem; width: 76px; flex-shrink: 0; }
 .status-row .status-course { font-size: 0.66rem; color: var(--ink-soft); display: block; font-weight: 500; }
+
+/* Winner banner — replaces the round-status row once every round is complete */
+.status-row.winner-row {
+  border-color: var(--sand-line);
+  background: linear-gradient(135deg, #FFFCF2, var(--sand) 200%);
+}
+.status-row.winner-row .status-name { font-family: var(--font-display); font-weight: 700; font-size: 1rem; }
+.status-row.winner-row .status-course { font-family: var(--font-display); font-size: 0.95rem; font-weight: 700; color: var(--ink); margin-top: 2px; }
 
 .season-nav { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 12px; }
 .season-nav .round-nav-btn { width: 34px; height: 34px; }
