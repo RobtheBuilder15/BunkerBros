@@ -46,7 +46,11 @@
   <section class="view" id="view-rounds">
     <p class="eyebrow">Scorecards</p>
     <h2 class="section-title">Scorecard</h2>
-    <div class="segmented" id="roundSegmented"></div>
+    <div class="segmented" id="roundSegmented">
+      <button data-round="1" class="active">Round 1</button>
+      <button data-round="2">Round 2</button>
+      <button data-round="3">Round 3</button>
+    </div>
     <div id="roundContent"></div>
   </section>
 
@@ -123,7 +127,11 @@
     <div id="modalScoreBody">
       <p class="helper-text" id="modalLoginNotice" style="display:none;"></p>
 
-      <div class="segmented" id="modalRoundSegmented"></div>
+      <div class="segmented" id="modalRoundSegmented">
+        <button data-round="1" class="active">Round 1</button>
+        <button data-round="2">Round 2</button>
+        <button data-round="3">Round 3</button>
+      </div>
 
       <div class="hole-nav">
         <button class="round-nav-btn" id="prevHoleBtn" aria-label="Previous hole">
@@ -142,6 +150,12 @@
         <h3>🐺 Wolf Tee Order (Hole 1)</h3>
         <p class="helper-text">Set the order the group tees off in. This sets who's wolf each hole on the front nine — it reverses automatically for the back nine.</p>
         <div id="modalWolfOrderInputs" class="field-row"></div>
+      </div>
+
+      <div id="modalOneOneOneOrderBlock" class="subgame-block" style="display:none;">
+        <h3>🎯 1-1-1 Order (Hole 1)</h3>
+        <p class="helper-text">Set the rotation order for who plays solo. This sets who's solo each hole on the front nine — it reverses automatically for the back nine.</p>
+        <div id="modalOneOneOneOrderInputs" class="field-row"></div>
       </div>
 
       <div id="modalScoreInputs"></div>
@@ -163,6 +177,7 @@
       </div>
 
       <button class="btn btn-primary btn-block" id="saveHoleBtn" style="margin-top:16px;">Save Hole</button>
+      <button class="btn btn-ghost btn-block" id="clearHoleBtn" style="margin-top:10px; display:none; border-color:var(--rust); color:var(--rust);">Clear Hole</button>
     </div>
   </div>
 </div>
