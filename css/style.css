@@ -390,6 +390,7 @@ button.btn:disabled { opacity: 0.5; }
 .round-nav-btn svg { width: 20px; height: 20px; }
 
 .score-input-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px dashed rgba(28,61,46,0.15); }
+.score-input-row.locked-row { opacity: 0.55; }
 .score-input-row label { flex: 1; font-weight: 700; font-size: 0.9rem; }
 .stepper { display: flex; align-items: center; gap: 10px; }
 .stepper button { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--ink); background: var(--white); font-size: 1.1rem; font-weight: 700; color: var(--ink); }
