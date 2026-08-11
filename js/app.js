@@ -1,48 +1,82 @@
 /* ===================================================================
-   BUNKER BROS BONANZA — app logic (v4)
+   BUNKER BROS BONANZA — app logic (v3)
 =================================================================== */
 
 const STORAGE_KEY_PREFIX = 'bbBonanzaRoom_v1_';
 const ACTIVE_ROOM_KEY = 'bbActiveRoomId_v1';
+// This deployment's Supabase project. The anon key is meant to be public —
+// row-level security + the create_room/join_room functions are what
+// actually gate access, not secrecy of this key.
 const SUPABASE_URL = 'https://nsztrhvlzmwtucunktgo.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_3qUoihACpekhjQLs4x1t3w_kXDV_Ti4';
 
+/* ---------------------------------------------------------------
+   HEIGHT FINDER
+---------------------------------------------------------------- */
 function updateHeight() {
-  document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
-  const isPWA = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-  if (isPWA) { document.body.classList.add("pwa"); document.documentElement.style.setProperty("--bottom-offset", "4px"); }
+  document.documentElement.style.setProperty(
+    "--app-height",
+    `${window.innerHeight}px`
+  );
+
+  const isPWA =
+  window.matchMedia("(display-mode: standalone)").matches ||
+  window.navigator.standalone === true; // Older iOS support
+
+  if (isPWA) {
+    document.body.classList.add("pwa");
+  }
+
+  if (isPWA) {
+    document.documentElement.style.setProperty("--bottom-offset", "4px");
+  }
 }
+
 window.addEventListener("resize", updateHeight);
 window.addEventListener("orientationchange", updateHeight);
+
 updateHeight();
 
 const bar = document.querySelector(".tab-bar");
+
 function updateBar() {
   if (!window.visualViewport) return;
-  const offset = window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop;
+
+  const offset =
+    window.innerHeight -
+    window.visualViewport.height -
+    window.visualViewport.offsetTop;
+
   bar.style.transform = `translateY(${offset}px)`;
 }
+
 visualViewport.addEventListener("resize", updateBar);
 visualViewport.addEventListener("scroll", updateBar);
 updateBar();
 
 const tabBar = document.querySelector(".tab-bar");
+
 function updateKeyboardState() {
     if (!window.visualViewport) return;
-    const keyboardOpen = window.visualViewport.height < window.innerHeight - 100;
+
+    const keyboardOpen =
+        window.visualViewport.height < window.innerHeight - 100;
+
     tabBar.classList.toggle("keyboard-open", keyboardOpen);
 }
+
 if (window.visualViewport) {
     visualViewport.addEventListener("resize", updateKeyboardState);
     visualViewport.addEventListener("scroll", updateKeyboardState);
 }
+
 updateKeyboardState();
 
 /* ---------------------------------------------------------------
    DEFAULT STATE
 ---------------------------------------------------------------- */
 function defaultHoles(count) {
-  const pars = [4,4,4,4,4,4,4,4,4, 4,4,4,4,4,4,4,4,4];
+  const pars = [4,4,3,4,4,4,4,3,5, 4,3,4,5,3,4,5,4,4];
   const idx  = [1,7,6,14,8,9,2,18,17, 11,13,3,5,10,16,4,12,15];
   const n = count || 18;
   return pars.slice(0, n).map((par, i) => ({ number: i + 1, par, index: idx[i] }));
@@ -53,6 +87,8 @@ function defaultCourse(name, ctpHole, ldHole, holeCount) {
   return { name, holes: defaultHoles(n), ctpHole, ldHole, holeCount: n };
 }
 
+// Resize a course's hole array (par/index) to a new hole count, preserving
+// existing holes and filling new ones from the standard pattern.
 function resizeCourseHoles(course, newCount) {
   if (newCount === course.holes.length) { course.holeCount = newCount; return; }
   if (newCount > course.holes.length) {
@@ -69,6 +105,7 @@ function resizeCourseHoles(course, newCount) {
   if (course.ldHole > newCount) course.ldHole = newCount;
 }
 
+// Resize a round's holes data object (scores) to match a new hole count.
 function resizeRoundHoles(round, newCount) {
   const holes = round.holes;
   const currentMax = Math.max(0, ...Object.keys(holes).map(Number));
@@ -129,15 +166,13 @@ function defaultRounds() {
     return holes;
   };
   return [
-    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: '3-Way Match Play',
-      holes: makeHoles(), ctpWinner: null, ldWinner: null, date: null,
-      excludeFromLifetime: false, tournamentWinner: null },
+    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: 'Match Play',
+      holes: makeHoles(), ctpWinner: null, ldWinner: null },
     { id: 2, type: 'wolf', label: 'Round 2', gameName: 'Wolf',
       holes: makeHoles(() => ({ wolf: { partner: 'lone' } })), ctpWinner: null, ldWinner: null,
-      wolfOrder: ['p1', 'p2', 'p3'], date: null, excludeFromLifetime: false, tournamentWinner: null },
+      wolfOrder: ['p1', 'p2', 'p3'] },
     { id: 3, type: '111', label: 'Round 3', gameName: '1-1-1',
-      holes: makeHoles(), ctpWinner: null, ldWinner: null, oneOneOneOrder: ['p1', 'p2', 'p3'],
-      date: null, excludeFromLifetime: false, tournamentWinner: null }
+      holes: makeHoles(), ctpWinner: null, ldWinner: null }
   ];
 }
 
@@ -145,20 +180,8 @@ function emptyRoomState() {
   return { config: defaultConfig(), rounds: defaultRounds(), archivedSeasons: [], year: String(new Date().getFullYear()), unlocked: false };
 }
 
-// Ensures older cached/remote rounds have the newer fields this version
-// introduced (date, excludeFromLifetime, tournamentWinner, oneOneOneOrder,
-// and "No Game" support), so nothing crashes reading pre-upgrade data.
-function migrateRounds(rounds) {
-  if (!rounds) return rounds;
-  rounds.forEach(r => {
-    if (r.date === undefined) r.date = null;
-    if (r.excludeFromLifetime === undefined) r.excludeFromLifetime = false;
-    if (r.tournamentWinner === undefined) r.tournamentWinner = null;
-    if (r.type === '111' && (!r.oneOneOneOrder || r.oneOneOneOrder.length !== 3)) r.oneOneOneOrder = ['p1', 'p2', 'p3'];
-  });
-  return rounds;
-}
-
+// Local cache of a room's data, keyed by room id, so the app has something
+// to show instantly (and offline) before/between Supabase round-trips.
 function loadRoomCache(roomId) {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_PREFIX + roomId);
@@ -167,14 +190,10 @@ function loadRoomCache(roomId) {
       if (parsed && parsed.config && parsed.rounds) {
         if (!parsed.archivedSeasons) parsed.archivedSeasons = [];
         if (!parsed.year) parsed.year = String(new Date().getFullYear());
-        if (!parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
+        if (parsed.rounds[1] && !parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
         if (parsed.config.openScoring == null) parsed.config.openScoring = false;
         if (parsed.config.courses) parsed.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-        migrateRounds(parsed.rounds);
-        (parsed.archivedSeasons || []).forEach(s => {
-          if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-          migrateRounds(s.rounds);
-        });
+        (parsed.archivedSeasons || []).forEach(s => { if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; }); });
         parsed.unlocked = false;
         return parsed;
       }
@@ -184,11 +203,17 @@ function loadRoomCache(roomId) {
 }
 
 let state = emptyRoomState();
+
+// Auth + room-membership runtime state (not itself game data — this drives
+// which room's data currently lives in `state` above).
 let auth = { client: null, session: null, rooms: [], activeRoomId: null, ready: false };
 
 function saveState() {
   if (!auth.activeRoomId) return;
   if (!isViewingLive()) {
+    // Editing an archived season: write the change back into that season's
+    // entry inside the live room snapshot (archived_seasons is just a JSON
+    // column on the same room row), rather than treating it as live data.
     const seasons = sortedArchivedSeasons();
     const target = seasons.find(s => s.archivedAt === viewingSeasonKey);
     if (target) { target.config = state.config; target.rounds = state.rounds; }
@@ -201,6 +226,11 @@ function saveState() {
 /* ---------------------------------------------------------------
    PERMISSIONS
 ---------------------------------------------------------------- */
+// True only when the currently-open room is the one explicitly entered via
+// the God Panel's "Open as Admin" button — not merely "I have no real
+// membership row here" (that check previously meant God Mode silently did
+// nothing whenever the super admin *also* happened to be a real member of
+// the target room, since activeMembership() would find that real row first).
 function isGodOverrideRoom() { return !!auth.godOverrideRoomId && auth.activeRoomId === auth.godOverrideRoomId; }
 function activeMembership() {
   if (auth.isSuperAdmin && isGodOverrideRoom()) {
@@ -249,13 +279,6 @@ function holeConfig(roundIdx, n) {
   const c = courseFor(roundIdx);
   return (c.holes.find(h => h.number === n)) || { number: n, par: 4, index: n };
 }
-function fmtDate(iso) {
-  if (!iso) return '';
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  const dt = new Date(y, m - 1, d);
-  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
 
 /* ---------------------------------------------------------------
    SCORING ENGINE
@@ -297,6 +320,12 @@ function matchPlayHolePoints(holeData, ids) {
   return result;
 }
 
+function rotatedPlayer(holeNumber, offset) {
+  const ids = playerIds();
+  return ids[(holeNumber - 1 + offset) % ids.length];
+}
+
+// Wolf tee order for a given hole, with the back nine using the reversed base order.
 function getWolfOrderForHole(round, holeNumber) {
   const base = (round.wolfOrder && round.wolfOrder.length === 3) ? round.wolfOrder : playerIds();
   let order, idx;
@@ -305,24 +334,13 @@ function getWolfOrderForHole(round, holeNumber) {
   return { wolf: order[idx], first: order[(idx + 1) % 3], second: order[(idx + 2) % 3] };
 }
 
-// Same rotation pattern as Wolf: a settable base order, front nine walks it
-// in order, back nine walks the reversed order — used to pick who's "solo"
-// each hole in 1-1-1.
-function getOneOneOneSoloForHole(round, holeNumber) {
-  const base = (round.oneOneOneOrder && round.oneOneOneOrder.length === 3) ? round.oneOneOneOrder : playerIds();
-  let order, idx;
-  if (holeNumber <= 9) { order = base; idx = (holeNumber - 1) % 3; }
-  else { order = [...base].reverse(); idx = (holeNumber - 10) % 3; }
-  return order[idx];
-}
-
 function wolfHolePoints(holeData, holeNumber, round) {
   const ids = playerIds();
   if (!allEntered(holeData, ids)) return null;
   const cfg = state.config.wolf;
   const { wolf: wolfPlayer, first, second } = getWolfOrderForHole(round, holeNumber);
   const others = ids.filter(id => id !== wolfPlayer);
-  const decision = (holeData.wolf && holeData.wolf.partner) || 'lone';
+  const decision = (holeData.wolf && holeData.wolf.partner) || 'lone'; // 'lone' | 'blind' | 'first' | 'second'
   const isBlind = decision === 'blind';
   const isLoneStyle = decision === 'lone' || decision === 'blind';
   let teamIds, oppIds, partnerId = null;
@@ -348,11 +366,11 @@ function wolfHolePoints(holeData, holeNumber, round) {
   return { points: result, wolfPlayer, teamIds, oppIds, lone: isLoneStyle, blind: isBlind, partnerId, outcome, decision };
 }
 
-function oneOneOneHolePoints(holeData, holeNumber, round) {
+function oneOneOneHolePoints(holeData, holeNumber) {
   const ids = playerIds();
   if (!allEntered(holeData, ids)) return null;
   const cfg = state.config.oneOneOne;
-  const soloPlayer = getOneOneOneSoloForHole(round, holeNumber);
+  const soloPlayer = rotatedPlayer(holeNumber, 0);
   const teamIds = ids.filter(id => id !== soloPlayer);
   const soloScore = holeData[soloPlayer];
   const teamBest = Math.min(...teamIds.map(id => holeData[id]));
@@ -366,8 +384,8 @@ function oneOneOneHolePoints(holeData, holeNumber, round) {
 function computeDailyAwards(totals) {
   const first = state.config.dailyGame.first;
   const second = state.config.dailyGame.second;
-  const positions = [first, second, 0];
   const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  const positions = [first, second, ...Array(Math.max(0, entries.length - 2)).fill(0)];
   const awards = {};
   let i = 0;
   while (i < entries.length) {
@@ -423,15 +441,11 @@ function computeRound(round, roundIdx) {
       const w = wolfHolePoints(hd, n, round);
       if (w) { gamePoints = w.points; meta = w; }
     } else if (round.type === '111') {
-      const o = oneOneOneHolePoints(hd, n, round);
+      const o = oneOneOneHolePoints(hd, n);
       if (o) { gamePoints = o.points; meta = o; }
     }
-    // 'none' (No Game) rounds never produce gamePoints — strokes/Stableford
-    // still accrue above, but there's no game-points/winner logic.
     if (gamePoints) {
       ids.forEach(id => rawGameTotals[id] += gamePoints[id]);
-    }
-    if (round.type === 'none' ? allEntered(hd, ids) : gamePoints) {
       holesComplete++;
     }
 
@@ -491,21 +505,10 @@ function computeAll() {
   return { rounds, totalsPerPlayer };
 }
 
-// All rounds finalized (every hole for every round complete) — used for the
-// Home "Winner" banner and for auto-computing the season's tournament winner.
-function allRoundsFinalized(computed) {
-  return computed.rounds.every(rc => rc.finalized);
-}
-
-function weekendRanking(computed) {
-  const ids = playerIds();
-  return ids.map(id => ({ id, total: computed.totalsPerPlayer[id].safeTotal })).sort((a, b) => b.total - a.total);
-}
-
 /* ---------------------------------------------------------------
    STATS ENGINE
 ---------------------------------------------------------------- */
-function computeStats(computed, rounds) {
+function computeStats(computed) {
   const ids = playerIds();
   const stats = {};
   ids.forEach(id => stats[id] = {
@@ -516,23 +519,17 @@ function computeStats(computed, rounds) {
     loneWolfW: 0, loneWolfL: 0, loneWolfT: 0,
     teammateW: 0, teammateL: 0, teammateT: 0,
     oneOneOneSoloWins: 0, oneOneOneTeamWins: 0,
-    ctpWins: 0, ldWins: 0,
-    tournamentWins: 0, tournamentRunnerUps: 0,
     bestRoundScore: null, bestRoundLabel: '',
     mostStablefordInRound: null, mostStablefordLabel: ''
   });
 
-  rounds.forEach((round, ri) => {
-    if (round.excludeFromLifetime) return;
+  state.rounds.forEach((round, ri) => {
     const rc = computed.rounds[ri];
     // "Best round score" and "most Stableford in a round" only make sense
     // comparing like-for-like — a 9-hole round can't fairly beat/lose to an
     // 18-hole one, and Scramble has no individual strokes at all, so those
     // rounds are skipped for these two stats only.
     const fullRound = (courseFor(ri + 1).holeCount || 18) === 18 && round.type !== 'scramble';
-
-    if (round.ctpWinner && stats[round.ctpWinner]) stats[round.ctpWinner].ctpWins++;
-    if (round.ldWinner && stats[round.ldWinner]) stats[round.ldWinner].ldWins++;
 
     if (fullRound) {
       ids.forEach(id => {
@@ -593,27 +590,11 @@ function computeStats(computed, rounds) {
     });
   });
 
-  rounds.forEach((round, ri) => {
-    if (round.excludeFromLifetime) return;
+  state.rounds.forEach((round, ri) => {
     const rc = computed.rounds[ri];
     const maxAward = Math.max(...ids.map(id => rc.dailyAwards[id] || 0));
     if (maxAward > 0) ids.forEach(id => { if ((rc.dailyAwards[id] || 0) === maxAward) stats[id].dailyWins++; });
   });
-
-  // Season-level tournament win/runner-up: prefer an admin-set winner if
-  // present, else fall back to computed weekend ranking once all rounds
-  // (that aren't excluded) are finalized.
-  const relevantRounds = rounds.map((r, i) => ({ r, rc: computed.rounds[i] }));
-  const allDone = relevantRounds.every(x => x.r.excludeFromLifetime || x.rc.finalized);
-  if (allDone) {
-    const explicitWinner = rounds.find(r => r.tournamentWinner)?.tournamentWinner;
-    let winnerId = explicitWinner || null;
-    let ranked = weekendRanking(computed);
-    if (!winnerId && ranked.length) winnerId = ranked[0].id;
-    if (winnerId && stats[winnerId]) stats[winnerId].tournamentWins++;
-    const runnerUp = ranked.find(r => r.id !== winnerId);
-    if (runnerUp && stats[runnerUp.id]) stats[runnerUp.id].tournamentRunnerUps++;
-  }
 
   return stats;
 }
@@ -632,25 +613,8 @@ function renderHeader() {
 function renderRoundStatus() {
   if (!appReady()) { document.getElementById('roundStatusWidget').innerHTML = ''; return; }
   const computed = computeAll();
-
-  if (allRoundsFinalized(computed)) {
-    const ranked = weekendRanking(computed);
-    const winnerId = ranked[0] ? ranked[0].id : null;
-    const html = `<div class="status-widget">
-      <div class="status-row done winner-row">
-        <div class="status-name" style="width:auto; flex:1;">
-          🏆 Winner
-          <span class="status-course">${winnerId ? escapeHtml(playerName(winnerId)) : ''}</span>
-        </div>
-        <div class="status-frac"><span class="status-check">✓</span></div>
-      </div>
-    </div>`;
-    document.getElementById('roundStatusWidget').innerHTML = html;
-    return;
-  }
-
   let currentIdx = computed.rounds.findIndex(rc => !rc.finalized);
-  if (currentIdx === -1) currentIdx = state.rounds.length - 1;
+  if (currentIdx === -1) currentIdx = state.rounds.length - 1; // all done — show the last round
 
   const round = state.rounds[currentIdx];
   const rc = computed.rounds[currentIdx];
@@ -792,37 +756,9 @@ function wolfCompactCell(round, n) {
   return `${wIn}+${initial(partnerId)}`;
 }
 
-function renderRoundTabs() {
-  const el = document.getElementById('roundSegmented');
-  if (!el) return;
-  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${activeRoundTab === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
-}
-function renderModalRoundTabs() {
-  const el = document.getElementById('modalRoundSegmented');
-  if (!el) return;
-  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${modalRound === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
-}
-
 function renderRoundsView() {
   renderRoundTabs();
   if (!appReady()) { document.getElementById('roundContent').innerHTML = readyGateHtml(); return; }
-
-  // Year indicator, top-right, across from the "Scorecard" heading.
-  const sectionTitle = document.querySelector('#view-rounds .section-title');
-  if (sectionTitle) {
-    let yearBadge = sectionTitle.querySelector('.year-indicator');
-    if (appReady()) {
-      if (!yearBadge) {
-        yearBadge = document.createElement('span');
-        yearBadge.className = 'year-indicator';
-        sectionTitle.appendChild(yearBadge);
-      }
-      yearBadge.textContent = `${state.year}` + (isViewingLive() ? '' : ' (archived)');
-    } else if (yearBadge) {
-      yearBadge.remove();
-    }
-  }
-
   const computed = computeAll();
   const round = state.rounds[activeRoundTab - 1];
   const rc = computed.rounds[activeRoundTab - 1];
@@ -830,29 +766,32 @@ function renderRoundsView() {
   const course = courseFor(activeRoundTab);
   const holeCount = course.holeCount || 18;
   const editable = canEditAnyScore();
-  const isScramble = round.type === 'scramble';
 
   const holesArr = []; for (let n = 1; n <= holeCount; n++) holesArr.push(n);
 
   let html = `<div class="scorecard-scroll"><table class="scorecard"><thead>`;
 
+  // course / game title row — colspan split scales with column count so the
+  // title bar still spans the full width whether this is a 9- or 18-hole card
   const totalCols = holeCount === 18 ? 22 : (holeCount + 2);
   const leftSpan = Math.ceil(totalCols / 2), rightSpan = totalCols - leftSpan;
-  const titleRight = round.gameName + (round.date ? ` · ${fmtDate(round.date)}` : '');
-  html += `<tr class="card-title-row"><td colspan="${leftSpan}" class="title-left">${escapeHtml(course.name)}</td><td colspan="${rightSpan}" class="title-right">${escapeHtml(titleRight)}</td></tr>`;
+  html += `<tr class="card-title-row"><td colspan="${leftSpan}" class="title-left">${escapeHtml(course.name)}</td><td colspan="${rightSpan}" class="title-right">${round.gameName}</td></tr>`;
 
+  // hole numbers header row
   const headerCells = holesArr.map(n => `<th class="${holeColClasses(course, n)}">${n}</th>`);
   html += assembleRow('<th>Hole</th>', headerCells, holeCount, '<th class="out-col">Out</th>', '<th class="in-col">In</th>', '<th class="total-col">Total</th>', 'hole-header');
   html += `</thead><tbody>`;
 
+  // Par row
   let parOut = 0, parIn = 0;
   const parCells = holesArr.map(n => { const par = holeConfig(activeRoundTab, n).par; if (n <= 9) parOut += par; else parIn += par; return `<td class="${holeColClasses(course, n)}">${par}</td>`; });
   html += assembleRow('<td>Par</td>', parCells, holeCount, `<td class="out-col">${parOut}</td>`, `<td class="in-col">${parIn}</td>`, `<td class="total-col">${parOut + parIn}</td>`, 'par-row');
 
+  // Index row
   const idxCells = holesArr.map(n => `<td class="${holeColClasses(course, n)}">${holeConfig(activeRoundTab, n).index}</td>`);
   html += assembleRow('<td>Index</td>', idxCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'index-row');
 
-  if (isScramble) {
+  if (round.type === 'scramble') {
     // Scramble: one shared team score per hole, no per-player breakdown at all.
     let teamOut = 0, teamIn = 0;
     const teamCells = rc.perHole.map(h => {
@@ -865,6 +804,7 @@ function renderRoundsView() {
       `<td class="out-col">${teamOut || ''}</td>`, `<td class="in-col">${teamIn || ''}</td>`, `<td class="total-col">${(teamOut + teamIn) || ''}</td>`,
       'score-row');
   } else {
+    // Player rows
     ids.forEach(id => {
       const collapsed = !!collapsedPlayers[id];
       let strokeOut = 0, strokeIn = 0;
@@ -882,13 +822,11 @@ function renderRoundsView() {
         `data-toggle="${id}"`
       );
 
-      if (round.type !== 'none') {
-        const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
-        const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
-        html += assembleRow('<td>Game Points</td>', gpCells, holeCount,
-          `<td class="out-col">${fmtOrBlank(gpOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(gpOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(gpOutIn.total)}</td>`,
-          `subrow ${collapsed ? 'hidden-row' : ''}`);
-      }
+      const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
+      const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
+      html += assembleRow('<td>Game Points</td>', gpCells, holeCount,
+        `<td class="out-col">${fmtOrBlank(gpOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(gpOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(gpOutIn.total)}</td>`,
+        `subrow ${collapsed ? 'hidden-row' : ''}`);
 
       const sfOutIn = sumOutInTotal(rc.perHole, h => h.stableford[id]);
       const sfCells = rc.perHole.map(h => { const v = h.stableford[id]; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
@@ -897,6 +835,7 @@ function renderRoundsView() {
         `subrow ${collapsed ? 'hidden-row' : ''}`);
     });
 
+    // Best Ball row (matchplay3 rounds only)
     if (round.type === 'matchplay3') {
       const bbOutIn = sumOutInTotal(rc.perHole, h => h.bestBall);
       const bbCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${h.bestBall != null ? h.bestBall : ''}</td>`);
@@ -905,20 +844,22 @@ function renderRoundsView() {
         'bestball-row');
     }
 
+    // Wolf indicator row (read-only — edit happens in Enter Score)
     if (round.type === 'wolf') {
       const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number)}</td>`);
       html += assembleRow('<td>🐺 Wolf</td>', wCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
     }
 
+    // 1-1-1 matchup indicator row (read-only)
     if (round.type === '111') {
-      const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(getOneOneOneSoloForHole(round, h.number))}</td>`);
+      const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(rotatedPlayer(h.number, 0))}</td>`);
       html += assembleRow('<td>Solo</td>', mCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
     }
   }
 
   html += `</tbody></table></div>`;
 
-  if (isScramble) {
+  if (round.type === 'scramble') {
     html += `<div class="card"><p class="helper-text" style="margin:0;">Scramble is just for fun — it doesn't count toward Stableford, game points, or the weekend leaderboard, and has no Closest to the Pin or Longest Drive.</p></div>`;
   } else {
     const ctpOpts = `<option value="">— Select —</option>` + ids.map(id => `<option value="${id}" ${round.ctpWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
@@ -942,8 +883,22 @@ function renderRoundsView() {
   });
   const ctpSel = document.getElementById('ctpWinnerSelect');
   const ldSel = document.getElementById('ldWinnerSelect');
-  if (ctpSel) ctpSel.addEventListener('change', () => { round.ctpWinner = ctpSel.value || null; saveState(); renderLeaderboard(); renderStats(); });
-  if (ldSel) ldSel.addEventListener('change', () => { round.ldWinner = ldSel.value || null; saveState(); renderLeaderboard(); renderStats(); });
+  if (ctpSel) ctpSel.addEventListener('change', () => { round.ctpWinner = ctpSel.value || null; saveState(); renderLeaderboard(); });
+  if (ldSel) ldSel.addEventListener('change', () => { round.ldWinner = ldSel.value || null; saveState(); renderLeaderboard(); });
+}
+
+// Regenerates the "Round 1 / Round 2 / ..." tab buttons for both the main
+// Scorecard view and the Enter Score modal, since the number of rounds is
+// now configurable instead of a fixed HTML trio.
+function renderRoundTabs() {
+  const el = document.getElementById('roundSegmented');
+  if (!el) return;
+  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${activeRoundTab === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
+}
+function renderModalRoundTabs() {
+  const el = document.getElementById('modalRoundSegmented');
+  if (!el) return;
+  el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${modalRound === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
 }
 
 /* ---------------------------------------------------------------
@@ -994,20 +949,14 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
     const ctpWinner = round.ctpWinner ? playerName(round.ctpWinner) : '';
     const ldWinner = round.ldWinner ? playerName(round.ldWinner) : '';
     rc.perHole.forEach(h => {
+      const note = gameNoteForHole(round, h);
       if (round.type === 'scramble') {
-        // One shared team score per hole — no per-player breakdown, and no
-        // game/Stableford/CTP/LD to report since Scramble is just for fun.
-        rows.push([
-          yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
-          'Team', h.teamScore != null ? h.teamScore : '',
-          '', '', '', '', ''
-        ]);
+        rows.push([yearLabel, round.label, course.name, round.gameName, h.number, h.par, h.index, 'Team', h.teamScore != null ? h.teamScore : '', '', '', note, ctpWinner, ldWinner]);
         return;
       }
-      const note = gameNoteForHole(round, h);
       ids.forEach(id => {
         rows.push([
-          yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
+          yearLabel, round.label, course.name, round.gameName, h.number, h.par, h.index,
           playerName(id), h.scores[id] != null ? h.scores[id] : '',
           h.gamePoints ? (h.gamePoints[id] != null ? h.gamePoints[id] : '') : '',
           h.stableford[id] != null ? h.stableford[id] : '',
@@ -1021,7 +970,7 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
 }
 
 function exportRoomCSV() {
-  const header = ['Year', 'Round', 'Course', 'Game', 'Date', 'Hole', 'Par', 'Index', 'Player', 'Strokes', 'GamePoints', 'StablefordPoints', 'GameNote', 'CTPWinner', 'DriveWinner'];
+  const header = ['Year', 'Round', 'Course', 'Game', 'Hole', 'Par', 'Index', 'Player', 'Strokes', 'GamePoints', 'StablefordPoints', 'GameNote', 'CTPWinner', 'DriveWinner'];
   const liveSrc = liveRoomState || state;
   let rows = [header];
   rows = rows.concat(csvRowsForSnapshot(liveSrc.year, liveSrc.config, liveSrc.rounds));
@@ -1036,14 +985,14 @@ function computeStatsForSnapshot(snapshot) {
   const savedConfig = state.config, savedRounds = state.rounds;
   state.config = snapshot.config; state.rounds = snapshot.rounds;
   const computed = computeAll();
-  const stats = computeStats(computed, snapshot.rounds);
+  const stats = computeStats(computed);
   state.config = savedConfig; state.rounds = savedRounds;
   return stats;
 }
 
 const LIFETIME_SUM_KEYS = ['birdies', 'pars', 'bogeys', 'eagles', 'albatrosses', 'dailyWins', 'mp3Wins', 'mp3Ties',
   'wolfChosenAsTeammate', 'loneWolfW', 'loneWolfL', 'loneWolfT', 'teammateW', 'teammateL', 'teammateT',
-  'oneOneOneSoloWins', 'oneOneOneTeamWins', 'ctpWins', 'ldWins', 'tournamentWins', 'tournamentRunnerUps'];
+  'oneOneOneSoloWins', 'oneOneOneTeamWins'];
 
 function computeLifetimeStats() {
   const liveSrc = liveRoomState || state;
@@ -1076,7 +1025,7 @@ let statsMode = 'lifetime';
 
 function renderStats() {
   if (!appReady()) { document.getElementById('statsList').innerHTML = readyGateHtml(); return; }
-  const stats = statsMode === 'lifetime' ? computeLifetimeStats() : computeStats(computeAll(), state.rounds);
+  const stats = statsMode === 'lifetime' ? computeLifetimeStats() : computeStats(computeAll());
   let ids = playerIds();
   const loggedInId = myPlayerId();
   if (loggedInId && ids.includes(loggedInId)) {
@@ -1084,11 +1033,9 @@ function renderStats() {
   }
   const list = document.getElementById('statsList');
 
-  const weekendLabel = isViewingLive() ? 'This Weekend' : `${state.year} Stats`;
-
   let html = `<div class="segmented" id="statsModeSegmented">
     <button data-mode="lifetime" class="${statsMode === 'lifetime' ? 'active' : ''}">Lifetime</button>
-    <button data-mode="weekend" class="${statsMode === 'weekend' ? 'active' : ''}">${escapeHtml(weekendLabel)}</button>
+    <button data-mode="weekend" class="${statsMode === 'weekend' ? 'active' : ''}">This Weekend</button>
   </div>`;
   ids.forEach(id => {
     const s = stats[id];
@@ -1101,7 +1048,7 @@ function renderStats() {
     html += statGroup('Daily Games', [
       ['Daily game wins', s.dailyWins]
     ]);
-    html += statGroup('3-Way Match Play', [
+    html += statGroup('Match Play', [
       ['Holes won', s.mp3Wins], ['Holes tied', s.mp3Ties]
     ]);
     html += statGroup('Wolf', [
@@ -1111,12 +1058,6 @@ function renderStats() {
     ]);
     html += statGroup('1-1-1', [
       ['Holes won solo', s.oneOneOneSoloWins], ['Holes won w/ teammate', s.oneOneOneTeamWins]
-    ]);
-    html += statGroup('Side Games', [
-      ['Closest to the Pin wins', s.ctpWins], ['Longest Drive wins', s.ldWins]
-    ]);
-    html += statGroup('Tournament', [
-      ['Tournaments won', s.tournamentWins], ['Runner-up finishes', s.tournamentRunnerUps]
     ]);
     html += statGroup('Bests', [
       ['Best round score', s.bestRoundScore != null ? `${s.bestRoundScore} (${s.bestRoundLabel})` : '–'],
@@ -1144,6 +1085,7 @@ function statGroup(title, rows) {
    AUTH + ROOMS (Supabase)
 ---------------------------------------------------------------- */
 let cloudSync = { channel: null, applyingRemote: false, pushTimer: null };
+
 let pendingRecovery = false;
 
 async function initSupabaseAuth() {
@@ -1186,6 +1128,7 @@ async function loadMyRooms() {
   const uniqueRoomIds = [...new Set(memberships.map(m => m.room_id))];
   const { data: rooms, error: roomErr } = await auth.client.from('rooms').select('id, room_code, name').in('id', uniqueRoomIds);
   if (roomErr) { console.warn(roomErr); auth.rooms = []; return; }
+  // Dedupe defensively by room id, in case of any stray duplicate membership rows.
   const seen = new Set();
   auth.rooms = [];
   memberships.forEach(m => {
@@ -1357,10 +1300,16 @@ async function enterRoomAsGod(roomId, name, roomCode) {
   await selectRoom(roomId, true);
 }
 
+// Fired when *any* row in this room's room_memberships changes — covers
+// an admin changing someone's role/Bro, a member being removed, or the
+// same account editing its own row from a different device/tab. Refetches
+// from Supabase so auth.rooms (and therefore myRole()/myPlayerId()) can
+// never drift from what's actually in the table.
 async function handleMembershipChange() {
   if (!auth.activeRoomId || !auth.client) return;
   await loadMyRooms();
   if (!isGodOverrideRoom() && !auth.rooms.some(r => r.id === auth.activeRoomId)) {
+    // Our own membership row is gone — we were removed from this room.
     showToast('You were removed from this room');
     switchRoomView();
     return;
@@ -1372,6 +1321,10 @@ async function selectRoom(roomId, viaGodMode) {
   if (cloudSync.channel) { auth.client.removeChannel(cloudSync.channel); cloudSync.channel = null; }
   editorPinUnlocked = false;
   liveRoomState = null; viewingSeasonKey = null;
+  // Only entering via the God Panel should grant the admin override — any
+  // other way of opening a room (your own room list, join/create, restoring
+  // your last session) should not silently inherit a stale override from an
+  // earlier God Mode visit to this same room.
   if (!viaGodMode) { auth.godOverrideRoomId = null; auth.godOverrideRoomMeta = null; }
   auth.activeRoomId = roomId;
   localStorage.setItem(ACTIVE_ROOM_KEY, roomId);
@@ -1410,11 +1363,7 @@ function switchRoomView() {
 function applyRemoteRoomRow(row) {
   cloudSync.applyingRemote = true;
   if (row.config && row.config.courses) row.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-  migrateRounds(row.rounds);
-  (row.archived_seasons || []).forEach(s => {
-    if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-    migrateRounds(s.rounds);
-  });
+  (row.archived_seasons || []).forEach(s => { if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; }); });
   const target = isViewingLive() ? state : liveRoomState;
   if (target) {
     target.config = row.config;
@@ -1450,7 +1399,7 @@ async function setMyPlayer(playerId) {
     await loadMyRooms(); renderAccountSection();
     return;
   }
-  await loadMyRooms();
+  await loadMyRooms(); // role may have auto-changed (e.g. to viewer if Unassigned)
   renderAccountSection();
   renderAll();
 }
@@ -1542,7 +1491,7 @@ async function loadAndRenderMembers() {
    SEASON NAVIGATION — Previous / Next year
 ---------------------------------------------------------------- */
 let liveRoomState = null;
-let viewingSeasonKey = null;
+let viewingSeasonKey = null; // null = live/current year; else the archivedAt of the season being viewed
 
 function isViewingLive() { return viewingSeasonKey === null; }
 function sortedArchivedSeasons() {
@@ -1568,7 +1517,7 @@ function navigateSeason(dir) {
     return;
   }
   const idx = seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
-  if (idx === -1) {
+  if (idx === -1) { // season vanished (e.g. deleted elsewhere) — fall back to live safely
     state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
     renderAll();
     return;
@@ -1583,14 +1532,15 @@ function navigateSeason(dir) {
   renderAll();
 }
 
+// Blank out all rounds for a new season while keeping each round's chosen
+// game type and hole count (those live on state.config/state.rounds and
+// would otherwise silently revert to the 3-way/wolf/1-1-1, 18-hole defaults).
 function blankRoundsPreservingSettings() {
   return state.rounds.map((r, i) => {
     const holeCount = courseFor(i + 1).holeCount || 18;
-    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null,
-      date: null, excludeFromLifetime: false, tournamentWinner: null };
-    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === 3) ? r.wolfOrder.slice() : playerIds();
-    if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === 3) ? r.oneOneOneOrder.slice() : playerIds();
+    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null };
     for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
+    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === 3) ? r.wolfOrder.slice() : playerIds();
     return fresh;
   });
 }
@@ -1615,21 +1565,6 @@ function addBacklogYear(label) {
   showToast(`Added ${label} — use the ‹ › arrows on Home to open and fill it in`);
 }
 
-// Admin-only: permanently delete an archived (non-live) season. The live
-// year can never be deleted this way — only past, already-archived years.
-function deleteArchivedYear(archivedAt) {
-  const idx = state.archivedSeasons.findIndex(s => s.archivedAt === archivedAt);
-  if (idx === -1) return;
-  const label = state.archivedSeasons[idx].year;
-  state.archivedSeasons.splice(idx, 1);
-  if (!isViewingLive() && viewingSeasonKey === archivedAt) {
-    state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
-  }
-  saveState();
-  renderAll();
-  showToast(`Deleted ${label}`);
-}
-
 function renderSeasonNav() {
   const el = document.getElementById('seasonHistoryWidget');
   if (!el) return;
@@ -1640,7 +1575,6 @@ function renderSeasonNav() {
   const idx = isViewingLive() ? -1 : seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
   const canPrev = isViewingLive() ? seasons.length > 0 : idx > 0;
   const canNext = !isViewingLive();
-  const showDelete = !isViewingLive() && isAdmin();
   el.innerHTML = `<div class="season-nav">
     <button class="round-nav-btn" id="seasonPrevBtn" ${canPrev ? '' : 'disabled'} aria-label="Previous year">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
@@ -1649,21 +1583,11 @@ function renderSeasonNav() {
     <button class="round-nav-btn" id="seasonNextBtn" ${canNext ? '' : 'disabled'} aria-label="Next year">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </button>
-    ${showDelete ? `<button class="round-nav-btn" id="seasonDeleteBtn" aria-label="Delete this year" style="color:var(--rust);">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z"/></svg>
-    </button>` : ''}
   </div>`;
   const prevBtn = document.getElementById('seasonPrevBtn');
   const nextBtn = document.getElementById('seasonNextBtn');
-  const delBtn = document.getElementById('seasonDeleteBtn');
   if (prevBtn) prevBtn.addEventListener('click', () => navigateSeason(-1));
   if (nextBtn) nextBtn.addEventListener('click', () => navigateSeason(1));
-  if (delBtn) delBtn.addEventListener('click', () => {
-    const typed = prompt(`This permanently deletes all "${state.year}" data. Type the year to confirm:`);
-    if (typed !== String(state.year)) { if (typed !== null) showToast('Did not match — not deleted'); return; }
-    const key = viewingSeasonKey;
-    deleteArchivedYear(key);
-  });
 }
 
 function setSyncDot(cls) {
@@ -1798,6 +1722,7 @@ function renderAccountSection() {
     return;
   }
 
+  // A room is active
   const m = activeMembership();
   const isGodRoom = isGodOverrideRoom();
   const room = isGodRoom ? auth.godOverrideRoomMeta : auth.rooms.find(r => r.id === auth.activeRoomId);
@@ -1864,7 +1789,7 @@ async function renderMyPlayerPicker() {
   const m = activeMembership();
   if (!document.getElementById('myPlayerPickerWrap')) return;
   const { data: taken } = await auth.client.rpc('get_taken_players', { p_room_id: auth.activeRoomId });
-  const wrap = document.getElementById('myPlayerPickerWrap');
+  const wrap = document.getElementById('myPlayerPickerWrap'); // re-fetch: a re-render may have replaced it while we awaited
   if (!wrap) return;
   const takenList = taken || [];
   const myId = m ? m.player_id : null;
@@ -1947,7 +1872,7 @@ function applyReadyGate() {
 /* ---------------------------------------------------------------
    RENDERING — MASTER SETTINGS
 ---------------------------------------------------------------- */
-const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', none: 'No Game', scramble: 'Scramble' };
+const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', scramble: 'Scramble' };
 
 function courseCard(roundIdx, dis) {
   dis = dis || '';
@@ -1960,8 +1885,6 @@ function courseCard(roundIdx, dis) {
   const typeOpts = availableTypes.map(val =>
     `<option value="${val}" ${round.type === val ? 'selected' : ''}>${GAME_TYPE_LABELS[val]}</option>`).join('');
   const isScramble = round.type === 'scramble';
-  const winnerOpts = `<option value="">— Auto (leaderboard) —</option>` + playerIds().map(id =>
-    `<option value="${id}" ${round.tournamentWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
@@ -1976,17 +1899,7 @@ function courseCard(roundIdx, dis) {
       <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
       <div class="field"><label>Longest Drive — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgLdHole" data-round="${roundIdx}" value="${c.ldHole}" ${dis}></div>
     </div>`}
-    <div class="field-row">
-      <div class="field"><label>Round Date</label><input type="date" class="cfgRoundDate" data-round="${roundIdx}" value="${round.date || ''}" ${dis}></div>
-      ${isScramble ? '' : `<div class="field"><label>Round Winner</label><select class="cfgRoundWinner" data-round="${roundIdx}" ${dis}>${winnerOpts}</select></div>`}
-    </div>
-    ${isScramble ? '' : `
-    <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0;">
-      <input type="checkbox" class="cfgExcludeLifetime" data-round="${roundIdx}" ${round.excludeFromLifetime ? 'checked' : ''} style="width:auto;" ${dis}>
-      <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Exclude this round from lifetime stats</label>
-    </div>`}
-    <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.</p>
-    <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
+    <p class="eyebrow" style="margin-top:10px;">Pars &amp; Stroke Index</p>
     <div class="hole-grid">${c.holes.map((h, i) => `
       <div class="field hole-par-input">
         <label>Hole ${h.number}</label>
@@ -1994,6 +1907,7 @@ function courseCard(roundIdx, dis) {
         <input type="number" class="cfgHoleIndex" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.index}" ${dis}>
       </div>`).join('')}
     </div>
+    <p class="helper-text">Top box = par, bottom box = stroke index.</p>
   </div>`;
 }
 
@@ -2019,7 +1933,7 @@ function addPlayer() {
   const n = state.config.players.length + 1;
   const id = 'p' + n;
   state.config.players.push({ id, name: `Player ${n}` });
-  state.rounds.forEach(r => { Object.values(r.holes).forEach(h => { if (!(id in h) && r.type !== 'scramble') h[id] = null; }); });
+  state.rounds.forEach(r => { Object.values(r.holes).forEach(h => { if (!(id in h)) h[id] = null; }); });
   enforceWolfPlayerConstraint();
   saveState(); renderAll();
 }
@@ -2032,10 +1946,8 @@ async function removeLastPlayer() {
   state.rounds.forEach(r => {
     Object.values(r.holes).forEach(h => { delete h[removed.id]; });
     if (r.wolfOrder) r.wolfOrder = r.wolfOrder.filter(id => id !== removed.id);
-    if (r.oneOneOneOrder) r.oneOneOneOrder = r.oneOneOneOrder.filter(id => id !== removed.id);
     if (r.ctpWinner === removed.id) r.ctpWinner = null;
     if (r.ldWinner === removed.id) r.ldWinner = null;
-    if (r.tournamentWinner === removed.id) r.tournamentWinner = null;
   });
   enforceWolfPlayerConstraint();
   saveState(); renderAll();
@@ -2054,8 +1966,7 @@ function addRound() {
   if (state.rounds.length >= MAX_ROUNDS) { showToast(`Maximum ${MAX_ROUNDS} rounds`); return; }
   const idx = state.rounds.length + 1;
   state.config.courses.push(defaultCourse(`Round ${idx} Course`, 8, 13, 18));
-  const newRound = { id: idx, type: 'matchplay3', label: `Round ${idx}`, gameName: GAME_TYPE_LABELS['matchplay3'], holes: {}, ctpWinner: null, ldWinner: null,
-    date: null, excludeFromLifetime: false, tournamentWinner: null };
+  const newRound = { id: idx, type: 'matchplay3', label: `Round ${idx}`, gameName: GAME_TYPE_LABELS['matchplay3'], holes: {}, ctpWinner: null, ldWinner: null };
   for (let n = 1; n <= 18; n++) newRound.holes[n] = buildEmptyHole(newRound);
   state.rounds.push(newRound);
   saveState(); renderAll();
@@ -2187,7 +2098,7 @@ function renderGameSettings() {
       else showToast('Incorrect PIN');
     });
   }
-  if (!editable) return;
+  if (!editable) return; // nothing below is interactive
 
   const addPlayerBtn = document.getElementById('addPlayerBtn');
   if (addPlayerBtn) addPlayerBtn.addEventListener('click', addPlayer);
@@ -2241,24 +2152,6 @@ function renderGameSettings() {
       saveState(); renderAll();
     });
   });
-  el.querySelectorAll('.cfgRoundDate').forEach(inp => {
-    inp.addEventListener('change', () => {
-      state.rounds[Number(inp.dataset.round) - 1].date = inp.value || null;
-      saveState(); renderAll();
-    });
-  });
-  el.querySelectorAll('.cfgRoundWinner').forEach(sel => {
-    sel.addEventListener('change', () => {
-      state.rounds[Number(sel.dataset.round) - 1].tournamentWinner = sel.value || null;
-      saveState(); renderAll();
-    });
-  });
-  el.querySelectorAll('.cfgExcludeLifetime').forEach(inp => {
-    inp.addEventListener('change', () => {
-      state.rounds[Number(inp.dataset.round) - 1].excludeFromLifetime = inp.checked;
-      saveState(); renderAll();
-    });
-  });
   el.querySelectorAll('.cfgRoundType').forEach(sel => {
     sel.addEventListener('change', () => {
       const roundIdx = Number(sel.dataset.round);
@@ -2281,7 +2174,6 @@ function renderGameSettings() {
       }
       if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== 3)) round.wolfOrder = playerIds();
       if (newType !== 'wolf') delete round.wolfOrder;
-      if (newType === '111' && (!round.oneOneOneOrder || round.oneOneOneOrder.length !== 3)) round.oneOneOneOrder = playerIds();
       saveState(); renderAll();
     });
   });
@@ -2341,7 +2233,7 @@ function renderAdminSettings() {
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">Season Archive</p>
-    <p class="helper-text" style="margin:0 0 10px;">Current year: <b>${escapeHtml(state.year)}</b>. Archiving snapshots this year's final scores, then clears the scorecards for the next trip. Everyone can browse archived years from Home using the ‹ › arrows, and you can edit past years there too. Use the trash icon next to an archived year's name on Home to delete it permanently (the live year can't be deleted here).</p>
+    <p class="helper-text" style="margin:0 0 10px;">Current year: <b>${escapeHtml(state.year)}</b>. Archiving snapshots this year's final scores, then clears the scorecards for the next trip. Everyone can browse archived years from Home using the ‹ › arrows, and you can edit past years there too.</p>
     <button class="btn btn-secondary btn-block" id="startNewYearBtn">Archive "${escapeHtml(state.year)}" &amp; Start New Year</button>
     <button class="btn btn-ghost btn-block" id="addBacklogYearBtn" style="margin-top:10px;">+ Add a Past Year (Backfill)</button>
     <p class="helper-text" style="margin-top:8px;">Adds a blank year to the archive so you can go fill in old scores you never entered — use the ‹ › arrows on Home to open it.</p>
@@ -2475,7 +2367,6 @@ function openScoreModal() {
   modalRound = round;
   modalHole = hole;
   document.getElementById('scoreModal').classList.remove('hidden');
-  renderModalRoundTabs();
 
   const gate = document.getElementById('modalLoginGate');
   const body = document.getElementById('modalScoreBody');
@@ -2486,6 +2377,7 @@ function openScoreModal() {
     else gateText.textContent = `You need to sign in and join or create a room before you can enter scores. Head to Settings → Account & Rooms.`;
     gate.style.display = 'block';
     body.style.display = 'none';
+    renderModalRoundTabs();
     return;
   }
   gate.style.display = 'none';
@@ -2526,22 +2418,11 @@ function renderModalHole() {
   const par = holeConfig(modalRound, modalHole).par;
   const ids = playerIds();
   const loggedInId = myPlayerId();
-  const course = courseFor(modalRound);
   const isScramble = round.type === 'scramble';
 
   document.getElementById('modalRoundTitle').textContent = `${round.label} · ${round.gameName}`;
   document.getElementById('modalHoleNumber').textContent = `Hole ${modalHole}`;
-
-  const isCtp = !isScramble && modalHole === course.ctpHole;
-  const isLd = !isScramble && modalHole === course.ldHole;
-  let parText = `Par ${par}`;
-  if (isCtp || isLd) {
-    const tags = [];
-    if (isCtp) tags.push('📍 CTP');
-    if (isLd) tags.push('🏌️ Longest Drive');
-    parText += ` · ${tags.join(' · ')}`;
-  }
-  document.getElementById('modalHolePar').textContent = parText;
+  document.getElementById('modalHolePar').textContent = `Par ${par}`;
 
   const saveBtn = document.getElementById('saveHoleBtn');
   const alreadyEntered = isScramble ? (hd.team != null) : allEntered(hd, ids);
@@ -2549,24 +2430,19 @@ function renderModalHole() {
   saveBtn.classList.toggle('btn-primary', !alreadyEntered);
   saveBtn.classList.toggle('btn-edit', alreadyEntered);
 
-  const clearBtn = document.getElementById('clearHoleBtn');
-  if (clearBtn) {
-    const anyEntered = isScramble ? (hd.team != null) : ids.some(id => hd[id] != null && hd[id] !== '');
-    clearBtn.style.display = anyEntered ? 'block' : 'none';
-  }
-
   const notice = document.getElementById('modalLoginNotice');
   notice.style.display = 'block';
-  notice.textContent = isAdmin()
-    ? `Admin mode — all strokes are editable.`
-    : isScramble
-      ? (canEditAnyScore() ? `Scramble is a shared team score — anyone with edit access can enter it.` : `Pick which player you are in Account & Rooms to unlock scoring.`)
+  notice.textContent = isScramble
+    ? (canEditAnyScore() ? `Scramble — enter the team's single score for the hole.` : `Sign in with edit access to enter the team score.`)
+    : isAdmin()
+      ? `Admin mode — all strokes are editable.`
       : state.config.openScoring
         ? `Open scoring is on for this room — anyone can edit any player's strokes.`
         : loggedInId
           ? `Playing as ${playerName(loggedInId)} — only your strokes are editable.`
           : `Pick which player you are in Account & Rooms to unlock your strokes.`;
 
+  // Wolf order block (hole 1, round 2 only)
   const wolfOrderBlock = document.getElementById('modalWolfOrderBlock');
   if (round.type === 'wolf' && modalHole === 1) {
     wolfOrderBlock.style.display = 'block';
@@ -2590,35 +2466,10 @@ function renderModalHole() {
     wolfOrderBlock.style.display = 'none';
   }
 
-  const oneOneOneOrderBlock = document.getElementById('modalOneOneOneOrderBlock');
-  if (oneOneOneOrderBlock) {
-    if (round.type === '111' && modalHole === 1) {
-      oneOneOneOrderBlock.style.display = 'block';
-      const order = (round.oneOneOneOrder && round.oneOneOneOrder.length === 3) ? round.oneOneOneOrder : playerIds();
-      const orderDiv = document.getElementById('modalOneOneOneOrderInputs');
-      orderDiv.innerHTML = [0, 1, 2].map(pos => `
-        <div class="field"><label>Position ${pos + 1}</label>
-          <select class="oneOneOneOrderSelect" data-pos="${pos}">
-            ${ids.map(id => `<option value="${id}" ${order[pos] === id ? 'selected' : ''}>${playerName(id)}</option>`).join('')}
-          </select>
-        </div>`).join('');
-      orderDiv.querySelectorAll('.oneOneOneOrderSelect').forEach(sel => {
-        sel.addEventListener('change', () => {
-          const newOrder = Array.from(orderDiv.querySelectorAll('.oneOneOneOrderSelect')).map(s => s.value);
-          round.oneOneOneOrder = newOrder;
-          saveState();
-          renderModalHole();
-        });
-      });
-    } else {
-      oneOneOneOrderBlock.style.display = 'none';
-    }
-  }
-
   const inputsDiv = document.getElementById('modalScoreInputs');
   if (isScramble) {
-    const locked = !canEditAnyScore();
     const val = hd.team != null ? hd.team : par;
+    const locked = !canEditAnyScore();
     inputsDiv.innerHTML = `<div class="score-input-row ${locked ? 'locked-row' : ''}">
       <label>Team Score</label>
       <div class="stepper">
@@ -2662,7 +2513,7 @@ function renderModalHole() {
   } else if (round.type === '111') {
     wolfBlock.style.display = 'none';
     matchupBlock.style.display = 'block';
-    const soloPlayer = getOneOneOneSoloForHole(round, modalHole);
+    const soloPlayer = rotatedPlayer(modalHole, 0);
     const teamIds = ids.filter(id => id !== soloPlayer);
     document.getElementById('modalMatchupTitle').textContent = 'Matchup';
     document.getElementById('modalMatchupText').textContent = `${playerName(soloPlayer)} (solo) vs. ${teamIds.map(playerName).join(' & ')} (team)`;
@@ -2677,21 +2528,20 @@ function renderModalHole() {
 function stepScore(playerId, delta) {
   const inp = document.querySelector(`.scoreVal[data-player="${playerId}"]`);
   if (inp.disabled) return;
-  const round = state.rounds[modalRound - 1];
-  const max = round.type === 'scramble' ? 20 : 15;
-  const next = Math.max(1, Math.min(max, Number(inp.value) + delta));
+  const next = Math.max(1, Math.min(15, Number(inp.value) + delta));
   inp.value = next;
   renderModalPreview();
 }
 
 function readModalTempHole() {
   const round = state.rounds[modalRound - 1];
+  const temp = {};
   if (round.type === 'scramble') {
     const inp = document.querySelector(`.scoreVal[data-player="team"]`);
-    return { team: inp ? Number(inp.value) : null };
+    temp.team = inp ? Number(inp.value) : null;
+    return temp;
   }
   const ids = playerIds();
-  const temp = {};
   ids.forEach(id => {
     const inp = document.querySelector(`.scoreVal[data-player="${id}"]`);
     temp[id] = inp ? Number(inp.value) : null;
@@ -2708,7 +2558,7 @@ function renderModalPreview() {
   const resultTitle = document.getElementById('modalAutoResultTitle');
   const resultText = document.getElementById('modalAutoResultText');
 
-  if (round.type === 'none' || round.type === 'scramble') {
+  if (round.type === 'scramble') {
     resultBlock.style.display = 'none';
     return;
   }
@@ -2717,7 +2567,7 @@ function renderModalPreview() {
   if (round.type === 'matchplay3') {
     resultTitle.textContent = 'Match Play Result';
     const pts = matchPlayHolePoints(temp, playerIds());
-    if (!pts) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    if (!pts) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     const parts = playerIds().map(id => `${playerName(id)}: ${fmtNum(pts[id])} pt${pts[id] === 1 ? '' : 's'}`);
     resultText.textContent = parts.join(' · ');
   } else if (round.type === 'wolf') {
@@ -2730,8 +2580,8 @@ function renderModalPreview() {
     else resultText.textContent = 'Hole tied — no points awarded.';
   } else if (round.type === '111') {
     resultTitle.textContent = '1-1-1 Result';
-    const o = oneOneOneHolePoints(temp, modalHole, round);
-    if (!o) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    const o = oneOneOneHolePoints(temp, modalHole);
+    if (!o) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     if (o.outcome === 'solo-win') resultText.textContent = `${playerName(o.soloPlayer)} wins solo (+${state.config.oneOneOne.soloWin}).`;
     else if (o.outcome === 'team-win') resultText.textContent = `${o.teamIds.map(playerName).join(' & ')} win as a team (+${state.config.oneOneOne.teamWin} each).`;
     else resultText.textContent = 'Hole tied — no points awarded.';
@@ -2765,33 +2615,6 @@ document.getElementById('saveHoleBtn').addEventListener('click', () => {
     showToast(`Hole ${maxHole} saved — round complete!`);
     closeScoreModal();
   }
-});
-
-// Clear all strokes (and wolf choice) for the currently-open hole. Only
-// clears players the current user is allowed to edit — mirrors the same
-// per-player permission check used when saving.
-document.getElementById('clearHoleBtn')?.addEventListener('click', () => {
-  if (!confirm(`Clear all scores entered for Hole ${modalHole}?`)) return;
-  const round = state.rounds[modalRound - 1];
-  const holeData = round.holes[modalHole];
-  let clearedAny = false;
-  if (round.type === 'scramble') {
-    if (canEditAnyScore() && holeData.team != null) { holeData.team = null; clearedAny = true; }
-  } else {
-    playerIds().forEach(id => {
-      if (!canEditPlayer(id)) return;
-      if (holeData[id] != null) { holeData[id] = null; clearedAny = true; }
-    });
-    if (round.type === 'wolf' && isAdmin()) holeData.wolf = { partner: 'lone' };
-  }
-  if (!clearedAny) { showToast('Nothing to clear'); return; }
-  saveState();
-  renderRoundsView();
-  renderLeaderboard();
-  renderRoundStatus();
-  renderStats();
-  renderModalHole();
-  showToast(`Hole ${modalHole} cleared`);
 });
 
 /* ---------------------------------------------------------------
