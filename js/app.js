@@ -42,7 +42,7 @@ updateKeyboardState();
    DEFAULT STATE
 ---------------------------------------------------------------- */
 function defaultHoles(count) {
-  const pars = [4,4,3,4,4,4,4,3,5, 4,3,4,5,3,4,5,4,4];
+  const pars = [4,4,4,4,4,4,4,4,4, 4,4,4,4,4,4,4,4,4];
   const idx  = [1,7,6,14,8,9,2,18,17, 11,13,3,5,10,16,4,12,15];
   const n = count || 18;
   return pars.slice(0, n).map((par, i) => ({ number: i + 1, par, index: idx[i] }));
