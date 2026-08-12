@@ -941,6 +941,10 @@ function wolfCompactCell(round, n, holeCountForRound) {
 function renderRoundTabs() {
   const el = document.getElementById('roundSegmented');
   if (!el) return;
+  // If there's only a single round configured, the tab strip has nothing
+  // to switch between — hide it rather than show a lone, useless button.
+  if (state.rounds.length <= 1) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  el.style.display = '';
   el.innerHTML = state.rounds.map((r, i) => `<button data-round="${i + 1}" class="${activeRoundTab === i + 1 ? 'active' : ''}">${r.label}</button>`).join('');
 }
 function renderModalRoundTabs() {
@@ -953,11 +957,14 @@ function renderRoundsView() {
   renderRoundTabs();
   if (!appReady()) { document.getElementById('roundContent').innerHTML = readyGateHtml(); return; }
 
-  // Year indicator, top-right, across from the "Scorecard" heading.
+  // Year indicator, top-right, across from the "Scorecard" heading — only
+  // meaningful once there's more than one year to distinguish between
+  // (i.e. at least one archived season exists alongside the live year).
   const sectionTitle = document.querySelector('#view-rounds .section-title');
   if (sectionTitle) {
     let yearBadge = sectionTitle.querySelector('.year-indicator');
-    if (appReady()) {
+    const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
+    if (appReady() && hasMultipleYears) {
       if (!yearBadge) {
         yearBadge = document.createElement('span');
         yearBadge.className = 'year-indicator';
@@ -1030,6 +1037,14 @@ function renderRoundsView() {
         `data-toggle="${id}"`
       );
 
+      if (useHandicaps()) {
+        const netOutIn = sumOutInTotal(rc.perHole, h => h.net[id]);
+        const netCells = rc.perHole.map(h => { const v = h.net[id]; return `<td class="${holeColClasses(course, h.number)}">${v != null ? v : ''}</td>`; });
+        html += assembleRow('<td>Net Score</td>', netCells, holeCount,
+          `<td class="out-col">${fmtOrBlank(netOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(netOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(netOutIn.total)}</td>`,
+          `subrow ${collapsed ? 'hidden-row' : ''}`);
+      }
+
       if (round.type !== 'none') {
         const gpOutIn = sumOutInTotal(rc.perHole, h => h.gamePoints ? h.gamePoints[id] : null);
         const gpCells = rc.perHole.map(h => { const v = h.gamePoints ? h.gamePoints[id] : null; return `<td class="${holeColClasses(course, h.number)}">${fmtOrBlank(v)}</td>`; });
@@ -1043,14 +1058,6 @@ function renderRoundsView() {
       html += assembleRow('<td>Stableford Points</td>', sfCells, holeCount,
         `<td class="out-col">${fmtOrBlank(sfOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(sfOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(sfOutIn.total)}</td>`,
         `subrow ${collapsed ? 'hidden-row' : ''}`);
-
-      if (useHandicaps()) {
-        const netOutIn = sumOutInTotal(rc.perHole, h => h.net[id]);
-        const netCells = rc.perHole.map(h => { const v = h.net[id]; return `<td class="${holeColClasses(course, h.number)}">${v != null ? v : ''}</td>`; });
-        html += assembleRow('<td>Net Score</td>', netCells, holeCount,
-          `<td class="out-col">${fmtOrBlank(netOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(netOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(netOutIn.total)}</td>`,
-          `subrow ${collapsed ? 'hidden-row' : ''}`);
-      }
     });
 
     if (round.type === 'matchplay3') {
@@ -1139,65 +1146,131 @@ function downloadCSV(filename, text) {
   } catch (e) { console.warn(e); showToast('Export failed'); }
 }
 
-function gameNoteForHole(round, h) {
+// One-line "Game" row indicator for a single hole — mirrors the compact
+// in-app scorecard indicators (Wolf/1-1-1/Skins) so the CSV's per-hole
+// "Game" row reads the same as what's on screen. Match Play has no useful
+// per-hole indicator beyond the points already implied by Stableford/Total,
+// so it's left blank; "No Game" and Scramble never reach this (Scramble is
+// handled entirely separately, and 'none' rounds simply produce blanks).
+function gameIndicatorForHole(round, h, holeCountForRound) {
   if (round.type === 'wolf' && h.meta) {
     const m = h.meta;
-    if (m.lone) return `${playerName(m.wolfPlayer)}${m.blind ? ' blind' : ' lone'}`;
-    return `${playerName(m.wolfPlayer)}+${playerName(m.partnerId)}`;
+    const base = m.lone ? `${initial(m.wolfPlayer)}${m.blind ? '⚡' : ''}` : `${initial(m.wolfPlayer)}+${initial(m.partnerId)}`;
+    return base;
   }
-  if (round.type === '111' && h.meta) return `${playerName(h.meta.soloPlayer)} solo`;
+  if (round.type === '111') {
+    return initial(getOneOneOneSoloForHole(round, h.number, holeCountForRound));
+  }
   if (round.type === 'skins' && h.meta) {
-    if (h.meta.winner) return `${playerName(h.meta.winner)} wins ${h.meta.skinsWon} skin${h.meta.skinsWon === 1 ? '' : 's'}`;
-    if (h.meta.tied) return 'tied — carries over';
+    if (h.meta.winner) return `${initial(h.meta.winner)}${h.meta.skinsWon > 1 ? ` x${h.meta.skinsWon}` : ''}`;
+    if (h.meta.tied) return 'carry';
   }
   return '';
+}
+
+// Builds the row block(s) for one round, formatted to match the club's
+// established export template (a header/course/game line, a Hole/Par/Index
+// trio, one row per player, a Game indicator row, then a blank separator
+// row) rather than the old one-row-per-hole-per-player layout.
+function csvRoundBlock(round, ri, computed, config) {
+  const ids = (config.players || []).map(p => p.id);
+  const nameOf = (id) => { const p = config.players.find(pl => pl.id === id); return p ? p.name : id; };
+  const rc = computed.rounds[ri];
+  const course = courseFor(ri + 1);
+  const holeCount = course.holeCount || 18;
+  const rows = [];
+
+  const ctpWinner = round.ctpWinner ? nameOf(round.ctpWinner) : '';
+  const ldWinner = round.ldWinner ? nameOf(round.ldWinner) : '';
+  const isScramble = round.type === 'scramble';
+
+  // Line 1: Round label, course, date, game name, CTP/LD hole+winner.
+  rows.push([
+    round.label, course.name, round.date || '', round.gameName, '',
+    '"CTP:" ', isScramble ? '' : course.ctpHole, isScramble ? '' : ctpWinner, '',
+    '"Longest Drive:"', isScramble ? '' : course.ldHole, isScramble ? '' : ldWinner, ''
+  ]);
+
+  // Line 2: Hole header row (always shows all 18 columns per the template;
+  // holes beyond the round's actual hole count are simply left blank).
+  const holeHeaderRow = ['"Hole"'];
+  for (let n = 1; n <= 18; n++) holeHeaderRow.push(n <= holeCount ? n : '');
+  holeHeaderRow.push('"Total"', '"Stableford Points"', '"Daily Game Points"');
+  rows.push(holeHeaderRow);
+
+  // Line 3: Par row.
+  const parRow = ['"Par"'];
+  for (let n = 1; n <= 18; n++) parRow.push(n <= holeCount ? holeConfig(ri + 1, n).par : '');
+  parRow.push('');
+  rows.push(parRow);
+
+  // Line 4: Index row.
+  const idxRow = ['"Index"'];
+  for (let n = 1; n <= 18; n++) idxRow.push(n <= holeCount ? holeConfig(ri + 1, n).index : '');
+  idxRow.push('');
+  rows.push(idxRow);
+
+  if (isScramble) {
+    // Scramble: single shared "Team" row, no Stableford/Daily Game points.
+    const teamRow = ['Team'];
+    let total = 0;
+    for (let n = 1; n <= 18; n++) {
+      const h = rc.perHole[n - 1];
+      const v = (h && n <= holeCount) ? h.teamScore : null;
+      if (v != null) total += v;
+      teamRow.push(v != null ? v : '');
+    }
+    teamRow.push(total || '', '', '');
+    rows.push(teamRow);
+  } else {
+    ids.forEach(id => {
+      const playerRow = [nameOf(id)];
+      for (let n = 1; n <= 18; n++) {
+        const h = rc.perHole[n - 1];
+        const v = (h && n <= holeCount) ? h.scores[id] : null;
+        playerRow.push(v != null ? v : '');
+      }
+      playerRow.push(rc.strokeTotals[id] || '', rc.stablefordTotals[id] || '', rc.dailyAwards[id] || '');
+      rows.push(playerRow);
+    });
+
+    // Game indicator row — blank for "No Game" rounds (nothing to show).
+    if (round.type !== 'none') {
+      const gameRow = ['"Game"'];
+      for (let n = 1; n <= 18; n++) {
+        const h = rc.perHole[n - 1];
+        gameRow.push((h && n <= holeCount) ? gameIndicatorForHole(round, h, holeCount) : '');
+      }
+      gameRow.push('');
+      rows.push(gameRow);
+    }
+  }
+
+  rows.push(['']);
+  return rows;
 }
 
 function csvRowsForSnapshot(yearLabel, config, rounds) {
   const savedConfig = state.config, savedRounds = state.rounds;
   state.config = config; state.rounds = rounds;
   const computed = computeAll();
-  const ids = playerIds();
   const rows = [];
-  state.rounds.forEach((round, ri) => {
-    const rc = computed.rounds[ri];
-    const course = courseFor(ri + 1);
-    const ctpWinner = round.ctpWinner ? playerName(round.ctpWinner) : '';
-    const ldWinner = round.ldWinner ? playerName(round.ldWinner) : '';
-    rc.perHole.forEach(h => {
-      if (round.type === 'scramble') {
-        // One shared team score per hole — no per-player breakdown, and no
-        // game/Stableford/CTP/LD to report since Scramble is just for fun.
-        rows.push([
-          yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
-          'Team', h.teamScore != null ? h.teamScore : '', '',
-          '', '', '', '', ''
-        ]);
-        return;
-      }
-      const note = gameNoteForHole(round, h);
-      ids.forEach(id => {
-        rows.push([
-          yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
-          playerName(id), h.scores[id] != null ? h.scores[id] : '',
-          config.useHandicaps ? (h.net[id] != null ? h.net[id] : '') : '',
-          h.gamePoints ? (h.gamePoints[id] != null ? h.gamePoints[id] : '') : '',
-          h.stableford[id] != null ? h.stableford[id] : '',
-          note, ctpWinner, ldWinner
-        ]);
-      });
-    });
-  });
+  state.rounds.forEach((round, ri) => { rows.push(...csvRoundBlock(round, ri, computed, config)); });
   state.config = savedConfig; state.rounds = savedRounds;
   return rows;
 }
 
 function exportRoomCSV() {
-  const header = ['Year', 'Round', 'Course', 'Game', 'Date', 'Hole', 'Par', 'Index', 'Player', 'Strokes', 'NetStrokes', 'GamePoints', 'StablefordPoints', 'GameNote', 'CTPWinner', 'DriveWinner'];
   const liveSrc = liveRoomState || state;
-  let rows = [header];
-  rows = rows.concat(csvRowsForSnapshot(liveSrc.year, liveSrc.config, liveSrc.rounds));
-  sortedArchivedSeasons().forEach(s => { rows = rows.concat(csvRowsForSnapshot(s.year, s.config, s.rounds)); });
+  const allSnapshots = [{ year: liveSrc.year, config: liveSrc.config, rounds: liveSrc.rounds }]
+    .concat(sortedArchivedSeasons().map(s => ({ year: s.year, config: s.config, rounds: s.rounds })));
+
+  let rows = [];
+  allSnapshots.forEach(snap => {
+    rows.push(['Year', snap.year]);
+    rows = rows.concat(csvRowsForSnapshot(snap.year, snap.config, snap.rounds));
+  });
+
   const csvText = rows.map(r => r.map(csvEscape).join(',')).join('\r\n');
   const room = auth.rooms.find(r => r.id === auth.activeRoomId);
   downloadCSV(`${(room ? room.room_code : 'bunker-bros')}-export.csv`, csvText);
