@@ -286,6 +286,14 @@ tr.bestball-row td { font-weight: 700; color: var(--ink); }
 tr.indicator-row td { font-size: 0.66rem; font-weight: 700; color: var(--ink); padding-top: 3px; padding-bottom: 3px; }
 .indicator-blind { color: var(--rust); }
 
+/* Skins indicator (won hole / carried over) */
+.skin-won { color: #4C8A5E; font-weight: 800; }
+.skin-carry { color: var(--tan-dark); font-weight: 700; }
+
+/* Net-stroke dot — small marker on a score cell that received a handicap
+   stroke on that hole */
+.net-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: var(--tan-dark); vertical-align: super; margin-left: 1px; }
+
 /* Out / In / Total columns inherit their row's color — bold only, no extra tint */
 td.out-col, th.out-col, td.in-col, th.in-col, td.total-col, th.total-col { font-weight: 700; }
 
@@ -340,6 +348,13 @@ table.breakdown-table tfoot td { font-weight: 800; background: var(--sand); bord
 .field input:focus, .field select:focus, .field textarea:focus, button:focus-visible, .tab-btn:focus-visible { outline: 3px solid var(--sand-line); outline-offset: 1px; }
 .field-row { display: flex; gap: 10px; }
 .field-row .field { flex: 1; }
+
+/* Player name + handicap live side by side in Settings */
+.player-field-row { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 14px; }
+.player-field-row .field { margin-bottom: 0; }
+.player-field-row .field.player-name-field { flex: 1; }
+.player-field-row .field.player-hcp-field { width: 92px; flex-shrink: 0; }
+.player-field-row .field.player-hcp-field input { text-align: center; font-family: var(--font-mono); }
 
 .hole-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 7px; margin-bottom: 6px; }
 .hole-par-input { text-align: center; }
