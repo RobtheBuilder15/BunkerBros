@@ -145,8 +145,8 @@
       </div>
 
       <div id="modalOneOneOneOrderBlock" class="subgame-block" style="display:none;">
-        <h3>🎯 1-1-1 Order (Hole 1)</h3>
-        <p class="helper-text">Set the rotation order for who plays solo. This sets who's solo each hole on the front nine — it reverses automatically for the back nine.</p>
+        <h3>🔄 6-6-6 Order (Hole 1)</h3>
+        <p class="helper-text">Set the rotation order for who plays solo. This sets who's solo each rotation on the front nine — it reverses automatically for the back nine.</p>
         <div id="modalOneOneOneOrderInputs" class="field-row"></div>
       </div>
 
@@ -170,6 +170,27 @@
 
       <button class="btn btn-primary btn-block" id="saveHoleBtn" style="margin-top:16px;">Save Hole</button>
       <button class="btn btn-ghost btn-block" id="clearHoleBtn" style="margin-top:10px; display:none; border-color:var(--rust); color:var(--rust);">Clear Hole</button>
+    </div>
+  </div>
+</div>
+
+<!-- COURSE EDITOR MODAL -->
+<div class="modal-backdrop hidden" id="courseEditorModal">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <h2 id="courseEditorTitle">Add Course</h2>
+      <button class="icon-btn" id="closeCourseEditorBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="courseEditorBody">
+      <div class="field"><label>Course Name</label><input type="text" id="courseEditorName" placeholder="e.g. Pinehurst No. 2"></div>
+      <p class="helper-text" id="courseEditorScopeText" style="margin:0 0 10px;">Courses are shared across every room — everyone will see this course in their picker.</p>
+      <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index (18 Holes)</p>
+      <p class="helper-text" style="margin-top:-4px;">Top box = par, bottom box = stroke index. This always stores a full 18-hole layout — rounds can use the front 9, back 9, or all 18.</p>
+      <div class="hole-grid" id="courseEditorHoleGrid"></div>
+      <button class="btn btn-primary btn-block" id="saveCourseBtn" style="margin-top:16px;">Save Course</button>
     </div>
   </div>
 </div>
