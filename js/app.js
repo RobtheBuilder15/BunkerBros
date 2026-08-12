@@ -50,7 +50,13 @@ function defaultHoles(count) {
 
 function defaultCourse(name, ctpHole, ldHole, holeCount) {
   const n = holeCount || 18;
-  return { name, holes: defaultHoles(n), ctpHole, ldHole, holeCount: n };
+  // courseId links this round's course to a shared golf_courses library
+  // entry (null = a one-off/custom course not saved to the shared
+  // database, e.g. legacy rooms created before this feature existed).
+  // holeSet records WHICH 9 (or all 18) of that library course's holes are
+  // currently loaded in — '18' | 'front9' | 'back9' — so switching back
+  // and forth doesn't lose track of which half was in use.
+  return { name, holes: defaultHoles(n), ctpHole, ldHole, holeCount: n, courseId: null, holeSet: n === 18 ? '18' : 'front9' };
 }
 
 function resizeCourseHoles(course, newCount) {
@@ -80,6 +86,28 @@ function resizeRoundHoles(round, newCount) {
     Object.keys(holes).forEach(k => { if (Number(k) > newCount) delete holes[k]; });
   }
 }
+
+// Pulls a 9- or 18-hole par/index layout out of a shared library course
+// (which always stores a full 18-hole layout) for a given holeSet
+// ('18' | 'front9' | 'back9'), renumbered locally to 1..9 or 1..18 so it
+// slots directly into course.holes the same way a hand-entered course
+// always has — nothing else in the app needs to know the holes originally
+// came from holes 10–18 of the source course.
+function holesForSet(libraryHoles, holeSet) {
+  const src = (libraryHoles || []).slice().sort((a, b) => a.number - b.number);
+  let slice;
+  if (holeSet === 'front9') slice = src.slice(0, 9);
+  else if (holeSet === 'back9') slice = src.slice(9, 18);
+  else slice = src.slice(0, 18);
+  return slice.map((h, i) => ({ number: i + 1, par: h.par, index: h.index }));
+}
+
+function holeSetLabel(holeSet) {
+  if (holeSet === 'front9') return '9 Holes (Front)';
+  if (holeSet === 'back9') return '9 Holes (Back)';
+  return '18 Holes';
+}
+function holeSetToCount(holeSet) { return holeSet === '18' ? 18 : 9; }
 
 const MIN_PLAYERS = 2, MAX_PLAYERS = 8;
 const MIN_ROUNDS = 1, MAX_ROUNDS = 6;
@@ -131,14 +159,14 @@ function defaultRounds() {
     return holes;
   };
   return [
-    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: '3-Way Match Play',
+    { id: 1, type: 'matchplay3', label: 'Round 1', gameName: 'Match Play',
       holes: makeHoles(), ctpWinner: null, ldWinner: null, date: null,
       excludeFromLifetime: false, tournamentWinner: null },
     { id: 2, type: 'wolf', label: 'Round 2', gameName: 'Wolf',
       holes: makeHoles(() => ({ wolf: { partner: 'lone' } })), ctpWinner: null, ldWinner: null,
       wolfOrder: ['p1', 'p2', 'p3'], date: null, excludeFromLifetime: false, tournamentWinner: null },
-    { id: 3, type: '111', label: 'Round 3', gameName: '1-1-1',
-      holes: makeHoles(), ctpWinner: null, ldWinner: null, oneOneOneOrder: ['p1', 'p2', 'p3'],
+    { id: 3, type: '111', label: 'Round 3', gameName: '6-6-6',
+      holes: makeHoles(), ctpWinner: null, ldWinner: null, oneOneOneOrder: ['p1', 'p2', 'p3'], rotateEvery: 6,
       date: null, excludeFromLifetime: false, tournamentWinner: null }
   ];
 }
@@ -162,6 +190,7 @@ function migrateRoundsForIds(rounds, ids) {
     if (r.excludeFromLifetime === undefined) r.excludeFromLifetime = false;
     if (r.tournamentWinner === undefined) r.tournamentWinner = null;
     if (r.type === '111' && (!r.oneOneOneOrder || r.oneOneOneOrder.length !== n)) r.oneOneOneOrder = ids;
+    if (r.type === '111' && r.rotateEvery == null) r.rotateEvery = 6;
     if (r.type === 'wolf' && (!r.wolfOrder || r.wolfOrder.length !== n)) r.wolfOrder = ids;
   });
   return rounds;
@@ -186,7 +215,11 @@ function migrateConfig(config) {
   if (config.useHandicaps == null) config.useHandicaps = false;
   if (!config.skins) config.skins = { pointValue: 1 };
   if (config.players) config.players.forEach(p => { if (p.handicap == null) p.handicap = 0; });
-  if (config.courses) config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+  if (config.courses) config.courses.forEach(c => {
+    if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18;
+    if (c.courseId === undefined) c.courseId = null;
+    if (!c.holeSet) c.holeSet = c.holeCount === 18 ? '18' : 'front9';
+  });
   return config;
 }
 
@@ -214,6 +247,13 @@ function loadRoomCache(roomId) {
 
 let state = emptyRoomState();
 let auth = { client: null, session: null, rooms: [], activeRoomId: null, ready: false };
+
+// Shared golf course database — global across every room/user (not part of
+// room state), loaded once after auth and kept live via a realtime
+// subscription. Each entry: { id, name, holes: [{number, par, index} x18] }.
+let courseLibrary = [];
+let courseLibraryLoaded = false;
+let courseLibraryChannel = null;
 
 function saveState() {
   if (!auth.activeRoomId) return;
@@ -392,18 +432,38 @@ function getWolfOrderForHole(round, holeNumber, holeCountForRound) {
   return { wolf: wolfPlayer, others };
 }
 
-// Same rotation pattern as Wolf: a settable base order, front nine walks it
-// in order, back nine walks the reversed order — used to pick who's "solo"
-// each hole in 1-1-1.
+// Divisors of holeCountForRound that make sense as a 6-6-6 rotation
+// frequency — only values that split the round's holes into even groups
+// are offered (e.g. 18 holes -> 1, 2, 3, 6; 9 holes -> 1, 3, 9 is silly so
+// capped below 9). "6-6-6" is just the traditional name for the 18-hole/
+// rotate-every-6 case; other frequencies are still valid variants.
+function oneOneOneRotationOptions(holeCountForRound) {
+  const n = holeCountForRound || 18;
+  const candidates = [1, 2, 3, 6, 9];
+  return candidates.filter(c => c < n && n % c === 0);
+}
+
+// Same rotation *pattern* as Wolf (settable base order, front nine walks
+// it, back nine walks the reversed order) but instead of rotating every
+// hole, the solo player only changes every `round.rotateEvery` holes — the
+// hole-6-6-6 style. holeNumber and rotateEvery are both 1-based; a group
+// of `rotateEvery` consecutive holes shares the same solo player, exactly
+// like the classic "6-6-6" format (rotate at holes 7 and 13 on an 18-hole
+// round, by default).
+// Rotates the solo player in even blocks across the WHOLE round — holes
+// 1-6, 7-12, 13-18 for the classic 18-hole/rotate-every-6 case — rather
+// than Wolf's front-nine/reversed-back-nine pattern, which doesn't match
+// how "6-6-6" is actually played (each of the 3 blocks plays a genuinely
+// different solo player straight through, with no reversal).
 function getOneOneOneSoloForHole(round, holeNumber, holeCountForRound) {
   const ids = playerIds();
   const n = ids.length;
   const base = (round.oneOneOneOrder && round.oneOneOneOrder.length === n) ? round.oneOneOneOrder : ids;
-  const half = Math.ceil((holeCountForRound || 18) / 2);
-  let order, idx;
-  if (holeNumber <= half) { order = base; idx = (holeNumber - 1) % n; }
-  else { order = [...base].reverse(); idx = (holeNumber - half - 1) % n; }
-  return order[idx];
+  const holeCount = holeCountForRound || 18;
+  const validRotations = oneOneOneRotationOptions(holeCount);
+  const rotateEvery = (round.rotateEvery && validRotations.includes(round.rotateEvery)) ? round.rotateEvery : (validRotations[validRotations.length - 1] || 1);
+  const groupIdx = Math.floor((holeNumber - 1) / rotateEvery) % n;
+  return base[groupIdx];
 }
 
 // Wolf now supports exactly 3 or 4 players. The wolf either goes it alone
@@ -1346,7 +1406,7 @@ function renderStats() {
     html += statGroup('Daily Games', [
       ['Daily game wins', s.dailyWins]
     ]);
-    html += statGroup('3-Way Match Play', [
+    html += statGroup('Match Play', [
       ['Holes won', s.mp3Wins], ['Holes tied', s.mp3Ties]
     ]);
     html += statGroup('Wolf', [
@@ -1354,7 +1414,7 @@ function renderStats() {
       ['Lone/Blind wolf W-L-T', `${s.loneWolfW}-${s.loneWolfL}-${s.loneWolfT}`],
       ["As wolf's teammate W-L-T", `${s.teammateW}-${s.teammateL}-${s.teammateT}`]
     ]);
-    html += statGroup('1-1-1', [
+    html += statGroup('6-6-6', [
       ['Holes won solo', s.oneOneOneSoloWins], ['Holes won w/ teammate', s.oneOneOneTeamWins]
     ]);
     html += statGroup('Skins', [
@@ -1419,11 +1479,58 @@ async function afterLogin() {
   auth.username = profile ? profile.username : (auth.session.user.email || '').split('@')[0];
   auth.isSuperAdmin = !!(profile && profile.is_super_admin);
   await loadMyRooms();
+  await loadCourseLibrary();
   const savedRoomId = localStorage.getItem(ACTIVE_ROOM_KEY);
   if (savedRoomId && auth.rooms.some(r => r.id === savedRoomId)) {
     await selectRoom(savedRoomId);
   } else if (auth.rooms.length === 1) {
     await selectRoom(auth.rooms[0].id);
+  }
+}
+
+// Loads the shared golf course database (global, not per-room) and keeps
+// it live via a realtime subscription — so if one Bro adds/edits a course
+// while another has the app open, the second person's course picker
+// updates without needing a manual refresh.
+async function loadCourseLibrary() {
+  const { data, error } = await auth.client.from('golf_courses').select('id, name, holes').order('name', { ascending: true });
+  if (error) { console.warn('Could not load course library', error); return; }
+  courseLibrary = data || [];
+  courseLibraryLoaded = true;
+  if (!courseLibraryChannel) {
+    courseLibraryChannel = auth.client
+      .channel('golf-courses')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'golf_courses' }, () => { loadCourseLibrary().then(() => refreshNonSettingsViews_orSettings()); })
+      .subscribe();
+  } else {
+    refreshNonSettingsViews_orSettings();
+  }
+}
+
+// Re-render whatever's currently visible after the course library changes
+// remotely — the settings panel (course picker lives there) if it's open,
+// otherwise just the ordinary views.
+function refreshNonSettingsViews_orSettings() {
+  if (settingsPanelsOpen && appReady()) { renderGameSettings(); } else { refreshNonSettingsViews(); }
+}
+
+function findCourseInLibrary(id) { return courseLibrary.find(c => c.id === id); }
+
+// Saves (inserts or updates) a course into the shared library. Used both
+// by "+ Add New Course" (insert) and "Edit This Course" (update in place —
+// affects every room/round currently pointing at this course id).
+async function saveCourseToLibrary(courseId, name, holes) {
+  const payload = { name, holes, updated_at: new Date().toISOString() };
+  if (courseId) {
+    const { error } = await auth.client.from('golf_courses').update(payload).eq('id', courseId);
+    if (error) { showToast('Could not save course'); return null; }
+    await loadCourseLibrary();
+    return courseId;
+  } else {
+    const { data, error } = await auth.client.from('golf_courses').insert(Object.assign({ created_by: auth.session.user.id }, payload)).select('id').maybeSingle();
+    if (error) { showToast('Could not save course'); return null; }
+    await loadCourseLibrary();
+    return data ? data.id : null;
   }
 }
 
@@ -1517,6 +1624,8 @@ async function changePassword(newPassword) {
 
 async function logOut() {
   if (cloudSync.channel) { auth.client.removeChannel(cloudSync.channel); cloudSync.channel = null; }
+  if (courseLibraryChannel) { auth.client.removeChannel(courseLibraryChannel); courseLibraryChannel = null; }
+  courseLibrary = []; courseLibraryLoaded = false;
   editorPinUnlocked = false;
   liveRoomState = null; viewingSeasonKey = null;
   await auth.client.auth.signOut();
@@ -1838,6 +1947,7 @@ function blankRoundsPreservingSettings() {
       date: null, excludeFromLifetime: false, tournamentWinner: null };
     if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === playerIds().length) ? r.wolfOrder.slice() : playerIds();
     if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === playerIds().length) ? r.oneOneOneOrder.slice() : playerIds();
+    if (r.type === '111') fresh.rotateEvery = r.rotateEvery || 6;
     for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
     return fresh;
   });
@@ -2088,7 +2198,7 @@ function renderAccountSection() {
     ${isGodRoom
       ? `<p class="helper-text" style="margin:0;">You're visiting with God Mode admin access — no Bro assignment needed here.</p>`
       : canPickBro
-        ? `<div id="ickerWrap"><p class="helper-text" style="margin:0;">Loading…</p></div>`
+        ? `<div id="myPlayerPickerWrap"><p class="helper-text" style="margin:0;">Loading…</p></div>`
         : `<div class="field" style="margin-bottom:0;"><label>You're playing as</label><p style="margin:4px 0 0; font-weight:700;">${m && m.player_id === 'unassigned' ? 'Unassigned' : playerName(m.player_id)}</p></div>
            <p class="helper-text" style="margin-top:6px;">Only the room admin can change this now.</p>`}
     <button class="btn btn-secondary btn-block" id="switchRoomBtn" style="margin-top:14px;">Switch Room</button>
@@ -2223,7 +2333,13 @@ function applyReadyGate() {
 /* ---------------------------------------------------------------
    RENDERING — MASTER SETTINGS
 ---------------------------------------------------------------- */
-const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', skins: 'Skins', none: 'No Game', scramble: 'Scramble' };
+// Order here is the dropdown order: "~ No Game ~" is always pinned first,
+// then every other game type chronologically by when it was added to the
+// app (Match Play → Wolf → 6-6-6 → Skins → Scramble). Internal type ids
+// (e.g. '111') stay stable for backward compatibility even though the
+// display label has changed (1-1-1 -> 6-6-6).
+const GAME_TYPE_LABELS = { none: '~ No Game ~', matchplay3: 'Match Play', wolf: 'Wolf', '111': '6-6-6', skins: 'Skins', scramble: 'Scramble' };
+const GAME_TYPE_ORDER = ['none', 'matchplay3', 'wolf', '111', 'skins', 'scramble'];
 
 function courseCard(roundIdx, dis) {
   dis = dis || '';
@@ -2232,21 +2348,42 @@ function courseCard(roundIdx, dis) {
   // Wolf's tee-rotation math now works for 3 or 4 players — hide it from
   // the picker outside that range rather than let someone select a game
   // that will silently misbehave.
-  const availableTypes = Object.keys(GAME_TYPE_LABELS).filter(t => t !== 'wolf' || [3, 4].includes(state.config.players.length));
+  const availableTypes = GAME_TYPE_ORDER.filter(t => t !== 'wolf' || [3, 4].includes(state.config.players.length));
   const typeOpts = availableTypes.map(val =>
     `<option value="${val}" ${round.type === val ? 'selected' : ''}>${GAME_TYPE_LABELS[val]}</option>`).join('');
   const isScramble = round.type === 'scramble';
+  const is666 = round.type === '111';
   const winnerOpts = `<option value="">— Auto (leaderboard) —</option>` + playerIds().map(id =>
     `<option value="${id}" ${round.tournamentWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
+  const rotationOpts = is666 ? oneOneOneRotationOptions(c.holeCount || 18) : [];
+  const currentRotation = (round.rotateEvery && rotationOpts.includes(round.rotateEvery)) ? round.rotateEvery : (rotationOpts[rotationOpts.length - 1] || 1);
+  const courseOpts = `<option value="">— Custom (not saved) —</option>` +
+    courseLibrary.map(lc => `<option value="${lc.id}" ${c.courseId === lc.id ? 'selected' : ''}>${escapeHtml(lc.name)}</option>`).join('');
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
       <div class="field"><label>Holes</label><select class="cfgRoundHoles" data-round="${roundIdx}" ${dis}>
-        <option value="9" ${c.holeCount === 9 ? 'selected' : ''}>9 Holes</option>
-        <option value="18" ${c.holeCount === 18 ? 'selected' : ''}>18 Holes</option>
+        <option value="18" ${c.holeSet === '18' ? 'selected' : ''}>18 Holes</option>
+        <option value="front9" ${c.holeSet === 'front9' ? 'selected' : ''}>9 Holes (Front)</option>
+        <option value="back9" ${c.holeSet === 'back9' ? 'selected' : ''}>9 Holes (Back)</option>
       </select></div>
     </div>
-    <div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>
+    <div class="field">
+      <label>Course</label>
+      <select class="cfgCourseSelect" data-round="${roundIdx}" ${dis}>${courseOpts}</select>
+    </div>
+    ${c.courseId ? '' : `<div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>`}
+    ${dis ? '' : `<div class="field-row">
+      <button type="button" class="btn btn-secondary cfgAddCourseBtn" data-round="${roundIdx}" style="flex:1;">+ Add New Course</button>
+      ${c.courseId ? `<button type="button" class="btn btn-secondary cfgEditCourseBtn" data-round="${roundIdx}" style="flex:1;">✏️ Edit This Course</button>` : ''}
+    </div>
+    <p class="helper-text" style="margin-top:8px;">Courses are shared across every room — saving or editing one here updates it everywhere it's used.</p>`}
+    ${is666 ? `
+    <div class="field"><label>Rotate Solo Player Every</label><select class="cfgRotateEvery" data-round="${roundIdx}" ${dis}>
+        ${rotationOpts.map(n => `<option value="${n}" ${currentRotation === n ? 'selected' : ''}>${n} hole${n === 1 ? '' : 's'}</option>`).join('')}
+      </select>
+      <p class="helper-text" style="margin-top:6px;">Classic "6-6-6" rotates every 6 holes on an 18-hole round. Only frequencies that divide evenly into this round's hole count are offered.</p>
+    </div>` : ''}
     ${isScramble ? `<p class="helper-text" style="margin:0 0 10px;">Scramble has no Closest to the Pin or Longest Drive — it's just for fun and never counts toward the leaderboard.</p>` : `
     <div class="field-row">
       <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
@@ -2261,13 +2398,13 @@ function courseCard(roundIdx, dis) {
       <input type="checkbox" class="cfgExcludeLifetime" data-round="${roundIdx}" ${round.excludeFromLifetime ? 'checked' : ''} style="width:auto;" ${dis}>
       <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Exclude this round from lifetime stats</label>
     </div>`}
-    <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.</p>
+    <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.${c.courseId ? ' Linked to a shared course — use "✏️ Edit This Course" above to change these.' : ''}</p>
     <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
     <div class="hole-grid">${c.holes.map((h, i) => `
       <div class="field hole-par-input">
         <label>Hole ${h.number}</label>
-        <input type="number" class="cfgHolePar" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;" ${dis}>
-        <input type="number" class="cfgHoleIndex" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.index}" ${dis}>
+        <input type="number" class="cfgHolePar" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;" ${dis || c.courseId ? 'disabled' : ''}>
+        <input type="number" class="cfgHoleIndex" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.index}" ${dis || c.courseId ? 'disabled' : ''}>
       </div>`).join('')}
     </div>
   </div>`;
@@ -2392,7 +2529,7 @@ function renderGameSettings() {
       <input type="checkbox" id="cfgUseHandicaps" ${c.useHandicaps ? 'checked' : ''} style="width:auto;" ${dis}>
       <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Use handicaps for scoring (net strokes)</label>
     </div>
-    <p class="helper-text" style="margin-top:8px;">When on, Match Play, Wolf, 1-1-1, Skins, and Stableford all compare net strokes — each player gets a stroke on their hardest holes by stroke index, based on the handicap above. Gross strokes are still what you enter and what the scorecard tracks; Scramble is unaffected (it has no individual strokes).</p>`;
+    <p class="helper-text" style="margin-top:8px;">When on, Match Play, Wolf, 6-6-6, Skins, and Stableford all compare net strokes — each player gets a stroke on their hardest holes by stroke index, based on the handicap above. Gross strokes are still what you enter and what the scorecard tracks; Scramble is unaffected (it has no individual strokes).</p>`;
   if (editable) {
     html += `<div class="field-row" style="margin-top:14px;">
       <button class="btn btn-secondary" id="addPlayerBtn" style="flex:1;" ${c.players.length >= MAX_PLAYERS ? 'disabled' : ''}>+ Add Player</button>
@@ -2447,11 +2584,12 @@ function renderGameSettings() {
     <p class="helper-text">Blind Wolf = going lone before seeing any tee shots. Whatever the hole's points would be, they're multiplied by this value. Works with 3 or 4 players in the room — outside that range, Wolf rounds auto-convert to Match Play.</p>
   </div>`;
 
-  html += `<div class="card"><p class="eyebrow">1-1-1 Point Allocation (Round 3)</p>
+  html += `<div class="card"><p class="eyebrow">6-6-6 Point Allocation</p>
     <div class="field-row">
       <div class="field"><label>Solo Win</label><input type="number" id="cfg111Solo" value="${c.oneOneOne.soloWin}" ${dis}></div>
       <div class="field"><label>Team Win (each)</label><input type="number" id="cfg111Team" value="${c.oneOneOne.teamWin}" ${dis}></div>
     </div>
+    <p class="helper-text">"6-6-6" is the classic name for this game when the solo player rotates every 6 holes — the rotation frequency for each round using this game type is set on that round's card below.</p>
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">Skins</p>
@@ -2544,6 +2682,41 @@ function renderGameSettings() {
   el.querySelectorAll('.cfgCourseName').forEach(inp => {
     inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).name = inp.value; saveState(); refreshNonSettingsViews(); });
   });
+  el.querySelectorAll('.cfgCourseSelect').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const roundIdx = Number(sel.dataset.round);
+      const course = courseFor(roundIdx);
+      const round = state.rounds[roundIdx - 1];
+      const newId = sel.value || null;
+      if (newId === course.courseId) return;
+      if (!newId) {
+        // Switched to "— Custom (not saved) —" — keep whatever pars/
+        // indexes are currently loaded, just detach from the library so
+        // they become freely editable again.
+        course.courseId = null;
+        saveState(); renderAll();
+        return;
+      }
+      const lib = findCourseInLibrary(newId);
+      if (!lib) return;
+      if (!confirm(`Load "${lib.name}"? This replaces the course name, pars, and stroke indexes for Round ${roundIdx} with the saved course. Existing scores are kept.`)) {
+        sel.value = course.courseId || ''; return;
+      }
+      course.courseId = newId;
+      course.name = lib.name;
+      course.holes = holesForSet(lib.holes, course.holeSet || '18');
+      const newCount = holeSetToCount(course.holeSet || '18');
+      resizeCourseHoles(course, newCount);
+      resizeRoundHoles(round, newCount);
+      saveState(); renderAll();
+    });
+  });
+  el.querySelectorAll('.cfgAddCourseBtn').forEach(btn => {
+    btn.addEventListener('click', () => openCourseEditor(Number(btn.dataset.round), null));
+  });
+  el.querySelectorAll('.cfgEditCourseBtn').forEach(btn => {
+    btn.addEventListener('click', () => openCourseEditor(Number(btn.dataset.round), courseFor(Number(btn.dataset.round)).courseId));
+  });
   el.querySelectorAll('.cfgCtpHole').forEach(inp => {
     inp.addEventListener('change', () => {
       const course = courseFor(Number(inp.dataset.round));
@@ -2599,24 +2772,49 @@ function renderGameSettings() {
       if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== playerIds().length)) round.wolfOrder = playerIds();
       if (newType !== 'wolf') delete round.wolfOrder;
       if (newType === '111' && (!round.oneOneOneOrder || round.oneOneOneOrder.length !== playerIds().length)) round.oneOneOneOrder = playerIds();
+      if (newType === '111' && round.rotateEvery == null) round.rotateEvery = 6;
       saveState(); renderAll();
     });
   });
   el.querySelectorAll('.cfgRoundHoles').forEach(sel => {
     sel.addEventListener('change', () => {
       const roundIdx = Number(sel.dataset.round);
-      const newCount = Number(sel.value);
+      const newHoleSet = sel.value; // '18' | 'front9' | 'back9'
       const course = courseFor(roundIdx);
       const round = state.rounds[roundIdx - 1];
-      if (newCount === course.holeCount) return;
+      if (newHoleSet === course.holeSet) return;
+      const newCount = holeSetToCount(newHoleSet);
       if (newCount < course.holeCount) {
         if (!confirm(`Switching Round ${roundIdx} to 9 holes will permanently delete any entered scores for holes 10–18. Continue?`)) {
-          sel.value = course.holeCount; return;
+          sel.value = course.holeSet; return;
         }
+      }
+      course.holeSet = newHoleSet;
+      if (course.courseId) {
+        // Linked to the shared library — re-pull the appropriate 9/18
+        // holes' pars & indexes straight from the source course rather
+        // than trying to slice/pad whatever was already in course.holes.
+        const lib = findCourseInLibrary(course.courseId);
+        if (lib) course.holes = holesForSet(lib.holes, newHoleSet);
       }
       resizeCourseHoles(course, newCount);
       resizeRoundHoles(round, newCount);
+      // A rotation frequency valid for the old hole count may no longer
+      // divide evenly into the new one (e.g. rotate-every-6 on 18 holes
+      // isn't valid at 9) — fall back to the largest still-valid option.
+      if (round.type === '111') {
+        const stillValid = oneOneOneRotationOptions(newCount);
+        if (!round.rotateEvery || !stillValid.includes(round.rotateEvery)) {
+          round.rotateEvery = stillValid[stillValid.length - 1] || 1;
+        }
+      }
       saveState(); renderAll();
+    });
+  });
+  el.querySelectorAll('.cfgRotateEvery').forEach(sel => {
+    sel.addEventListener('change', () => {
+      state.rounds[Number(sel.dataset.round) - 1].rotateEvery = Number(sel.value);
+      saveState(); refreshNonSettingsViews();
     });
   });
   el.querySelectorAll('.cfgHolePar').forEach(inp => {
@@ -3090,7 +3288,7 @@ function renderModalPreview() {
     else if (w.outcome === 'opp-win') resultText.textContent = `${w.oppIds.map(playerName).join(' & ')} beat the wolf${tag}.`;
     else resultText.textContent = 'Hole tied — no points awarded.';
   } else if (round.type === '111') {
-    resultTitle.textContent = '1-1-1 Result';
+    resultTitle.textContent = '6-6-6 Result';
     const o = oneOneOneHolePoints(temp, modalHole, round, hc.index, holeCount);
     if (!o) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     if (o.outcome === 'solo-win') resultText.textContent = `${playerName(o.soloPlayer)} wins solo (+${state.config.oneOneOne.soloWin}).`;
@@ -3163,6 +3361,80 @@ document.getElementById('clearHoleBtn')?.addEventListener('click', () => {
   renderStats();
   renderModalHole();
   showToast(`Hole ${modalHole} cleared`);
+});
+
+/* ---------------------------------------------------------------
+   COURSE EDITOR MODAL — add/edit a shared golf_courses library entry
+---------------------------------------------------------------- */
+// Which round is being edited/added-for when the course editor is open,
+// and (if editing) which existing library course id is being updated.
+let courseEditorRoundIdx = null;
+let courseEditorCourseId = null;
+
+function openCourseEditor(roundIdx, courseId) {
+  courseEditorRoundIdx = roundIdx;
+  courseEditorCourseId = courseId || null;
+  const isEdit = !!courseId;
+  document.getElementById('courseEditorTitle').textContent = isEdit ? 'Edit Course' : 'Add Course';
+  document.getElementById('courseEditorScopeText').textContent = isEdit
+    ? 'This course is shared across every room — saving changes here updates it everywhere it\'s used.'
+    : 'Courses are shared across every room — everyone will see this course in their picker.';
+
+  let nameVal = '';
+  let holesVal = defaultHoles(18);
+  if (isEdit) {
+    const lib = findCourseInLibrary(courseId);
+    if (lib) { nameVal = lib.name; holesVal = holesForSet(lib.holes, '18'); }
+  }
+  document.getElementById('courseEditorName').value = nameVal;
+
+  const grid = document.getElementById('courseEditorHoleGrid');
+  grid.innerHTML = holesVal.map((h, i) => `
+    <div class="field hole-par-input">
+      <label>Hole ${h.number}</label>
+      <input type="number" class="courseEditorPar" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;">
+      <input type="number" class="courseEditorIndex" data-hole-idx="${i}" value="${h.index}">
+    </div>`).join('');
+
+  document.getElementById('courseEditorModal').classList.remove('hidden');
+}
+
+function closeCourseEditor() { document.getElementById('courseEditorModal').classList.add('hidden'); }
+
+document.getElementById('closeCourseEditorBtn').addEventListener('click', closeCourseEditor);
+document.getElementById('courseEditorModal').addEventListener('click', (e) => { if (e.target.id === 'courseEditorModal') closeCourseEditor(); });
+
+document.getElementById('saveCourseBtn').addEventListener('click', async () => {
+  const name = document.getElementById('courseEditorName').value.trim();
+  if (!name) { showToast('Enter a course name'); return; }
+  const pars = Array.from(document.querySelectorAll('.courseEditorPar')).map(inp => Number(inp.value) || 4);
+  const idxs = Array.from(document.querySelectorAll('.courseEditorIndex')).map(inp => Number(inp.value) || 1);
+  const holes = pars.map((par, i) => ({ number: i + 1, par, index: idxs[i] }));
+
+  const btn = document.getElementById('saveCourseBtn');
+  btn.disabled = true;
+  try {
+    const savedId = await saveCourseToLibrary(courseEditorCourseId, name, holes);
+    if (!savedId) return; // saveCourseToLibrary already toasted the error
+    // Apply the saved course to the round that triggered the editor, using
+    // whatever hole set (18/front9/back9) that round is currently set to.
+    if (courseEditorRoundIdx) {
+      const course = courseFor(courseEditorRoundIdx);
+      const round = state.rounds[courseEditorRoundIdx - 1];
+      course.courseId = savedId;
+      course.name = name;
+      course.holes = holesForSet(holes, course.holeSet || '18');
+      const newCount = holeSetToCount(course.holeSet || '18');
+      resizeCourseHoles(course, newCount);
+      resizeRoundHoles(round, newCount);
+      saveState();
+    }
+    closeCourseEditor();
+    renderAll();
+    showToast(courseEditorCourseId ? 'Course updated' : 'Course added');
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /* ---------------------------------------------------------------
