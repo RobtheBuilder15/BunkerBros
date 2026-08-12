@@ -99,9 +99,9 @@ function buildEmptyHole(round) {
 function defaultConfig() {
   return {
     players: [
-      { id: 'p1', name: 'Player 1' },
-      { id: 'p2', name: 'Player 2' },
-      { id: 'p3', name: 'Player 3' }
+      { id: 'p1', name: 'Player 1', handicap: 0 },
+      { id: 'p2', name: 'Player 2', handicap: 0 },
+      { id: 'p3', name: 'Player 3', handicap: 0 }
     ],
     courses: [
       defaultCourse('Round 1 Course', 8, 13),
@@ -113,8 +113,10 @@ function defaultConfig() {
     sideGamePoints: 2,
     wolf: { soloWin: 2, teamWin: 1, opponentWin: 1, blindMultiplier: 2 },
     oneOneOne: { soloWin: 2, teamWin: 1 },
+    skins: { pointValue: 1 },
     bestBallGoal: 84,
     openScoring: false,
+    useHandicaps: false,
     pin: '1234',
     requirePinForEditors: true
   };
@@ -147,16 +149,45 @@ function emptyRoomState() {
 
 // Ensures older cached/remote rounds have the newer fields this version
 // introduced (date, excludeFromLifetime, tournamentWinner, oneOneOneOrder,
-// and "No Game" support), so nothing crashes reading pre-upgrade data.
-function migrateRounds(rounds) {
+// wolfOrder, and "No Game" support), so nothing crashes reading
+// pre-upgrade data. Takes the player-id list explicitly rather than
+// reading global state, since this runs during room-load before `state`
+// necessarily reflects the data being migrated (see applyRemoteRoomRow,
+// which migrates an incoming row before assigning it into state/liveRoomState).
+function migrateRoundsForIds(rounds, ids) {
   if (!rounds) return rounds;
+  const n = (ids && ids.length) || 3;
   rounds.forEach(r => {
     if (r.date === undefined) r.date = null;
     if (r.excludeFromLifetime === undefined) r.excludeFromLifetime = false;
     if (r.tournamentWinner === undefined) r.tournamentWinner = null;
-    if (r.type === '111' && (!r.oneOneOneOrder || r.oneOneOneOrder.length !== 3)) r.oneOneOneOrder = ['p1', 'p2', 'p3'];
+    if (r.type === '111' && (!r.oneOneOneOrder || r.oneOneOneOrder.length !== n)) r.oneOneOneOrder = ids;
+    if (r.type === 'wolf' && (!r.wolfOrder || r.wolfOrder.length !== n)) r.wolfOrder = ids;
   });
   return rounds;
+}
+// Convenience wrapper for the common case of migrating against currently-
+// loaded global state (used by loadRoomCache, which loads into `state`
+// directly and has no separate "incoming config" to migrate against).
+function migrateRounds(rounds) { return migrateRoundsForIds(rounds, playerIds()); }
+// Wrapper for migrating a row/snapshot's rounds against ITS OWN config's
+// player list, not global state — required in applyRemoteRoomRow since the
+// incoming row hasn't been assigned into state/liveRoomState yet.
+function migrateRoundsForConfig(rounds, config) {
+  const ids = (config && config.players) ? config.players.map(p => p.id) : ['p1', 'p2', 'p3'];
+  return migrateRoundsForIds(rounds, ids);
+}
+
+// Backfills config fields added after a room was first created: player
+// handicaps, the skins point-value block, and the useHandicaps toggle.
+// Safe to call repeatedly — every check is a no-op once already present.
+function migrateConfig(config) {
+  if (!config) return config;
+  if (config.useHandicaps == null) config.useHandicaps = false;
+  if (!config.skins) config.skins = { pointValue: 1 };
+  if (config.players) config.players.forEach(p => { if (p.handicap == null) p.handicap = 0; });
+  if (config.courses) config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+  return config;
 }
 
 function loadRoomCache(roomId) {
@@ -167,12 +198,10 @@ function loadRoomCache(roomId) {
       if (parsed && parsed.config && parsed.rounds) {
         if (!parsed.archivedSeasons) parsed.archivedSeasons = [];
         if (!parsed.year) parsed.year = String(new Date().getFullYear());
-        if (!parsed.rounds[1].wolfOrder) parsed.rounds[1].wolfOrder = ['p1', 'p2', 'p3'];
-        if (parsed.config.openScoring == null) parsed.config.openScoring = false;
-        if (parsed.config.courses) parsed.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+        migrateConfig(parsed.config);
         migrateRounds(parsed.rounds);
         (parsed.archivedSeasons || []).forEach(s => {
-          if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
+          if (s.config) migrateConfig(s.config);
           migrateRounds(s.rounds);
         });
         parsed.unlocked = false;
@@ -239,6 +268,10 @@ function playerName(id) {
   const p = state.config.players.find(p => p.id === id);
   return p ? p.name : id;
 }
+function playerHandicap(id) {
+  const p = state.config.players.find(p => p.id === id);
+  return p && p.handicap != null ? Number(p.handicap) : 0;
+}
 function initial(id) { return (playerName(id)[0] || '?').toUpperCase(); }
 function courseFor(roundIdx) {
   const c = state.config.courses[roundIdx - 1];
@@ -255,6 +288,48 @@ function fmtDate(iso) {
   if (!y || !m || !d) return iso;
   const dt = new Date(y, m - 1, d);
   return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/* ---------------------------------------------------------------
+   HANDICAP / NET SCORING
+   Standard stroke allocation: a player gets 1 extra stroke on every hole
+   whose stroke index is <= their (rounded) handicap; if the handicap
+   exceeds the hole count, a 2nd (3rd, ...) stroke is layered on starting
+   from index 1 again. Decimal handicaps (e.g. 12.4) round to the nearest
+   whole stroke for allocation — the decimal itself is just kept for the
+   player's own reference/Course Handicap tracking.
+---------------------------------------------------------------- */
+function useHandicaps() { return !!state.config.useHandicaps; }
+
+function strokesReceivedOnHole(handicap, holeIndex, holeCount) {
+  if (!handicap || handicap <= 0) return 0;
+  const hcp = Math.round(handicap);
+  const n = holeCount || 18;
+  const base = Math.floor(hcp / n);
+  const remainder = hcp - base * n;
+  let strokes = base;
+  if (holeIndex <= remainder) strokes += 1;
+  return strokes;
+}
+
+// Net strokes for one player on one hole. Returns null if gross is null
+// (hole not yet entered) so callers can still treat null as "not entered".
+function netStrokes(gross, handicap, holeIndex, holeCount) {
+  if (gross == null || gross === '') return null;
+  return gross - strokesReceivedOnHole(handicap, holeIndex, holeCount);
+}
+
+// The value every scoring engine should actually compare for a hole: net
+// strokes when handicaps are on, gross otherwise (so toggling the setting
+// off exactly reproduces old, pre-handicap behavior with zero code changes
+// downstream). ids is the roster to compute for; hd is the hole's raw
+// score object; holeIndex/holeCount come from the round's course.
+function comparisonScores(hd, ids, holeIndex, holeCount) {
+  const out = {};
+  ids.forEach(id => {
+    out[id] = useHandicaps() ? netStrokes(hd[id], playerHandicap(id), holeIndex, holeCount) : hd[id];
+  });
+  return out;
 }
 
 /* ---------------------------------------------------------------
@@ -285,11 +360,12 @@ function allEntered(holeData, ids) {
   return ids.every(id => holeData[id] != null && holeData[id] !== '');
 }
 
-function matchPlayHolePoints(holeData, ids) {
+function matchPlayHolePoints(holeData, ids, holeIndex, holeCount) {
   if (!allEntered(holeData, ids)) return null;
-  const vals = ids.map(id => holeData[id]);
+  const cmp = comparisonScores(holeData, ids, holeIndex, holeCount);
+  const vals = ids.map(id => cmp[id]);
   const min = Math.min(...vals);
-  const winners = ids.filter(id => holeData[id] === min);
+  const winners = ids.filter(id => cmp[id] === min);
   const result = {};
   ids.forEach(id => result[id] = 0);
   if (winners.length === 1) result[winners[0]] = 1;
@@ -297,43 +373,63 @@ function matchPlayHolePoints(holeData, ids) {
   return result;
 }
 
-function getWolfOrderForHole(round, holeNumber) {
-  const base = (round.wolfOrder && round.wolfOrder.length === 3) ? round.wolfOrder : playerIds();
+// Wolf tee order for a hole, generalized to work for either 3 or 4
+// players (previously hardcoded to exactly 3). Front-nine (or first-half,
+// for 9-hole rounds) walks the base order; back-nine walks it reversed.
+// Returns the wolf for this hole plus every other player in seat order
+// (so callers can build "team with X" options without assuming there are
+// exactly 2 other players, as the old first/second scheme did).
+function getWolfOrderForHole(round, holeNumber, holeCountForRound) {
+  const ids = playerIds();
+  const n = ids.length;
+  const base = (round.wolfOrder && round.wolfOrder.length === n) ? round.wolfOrder : ids;
+  const half = Math.ceil((holeCountForRound || 18) / 2);
   let order, idx;
-  if (holeNumber <= 9) { order = base; idx = (holeNumber - 1) % 3; }
-  else { order = [...base].reverse(); idx = (holeNumber - 10) % 3; }
-  return { wolf: order[idx], first: order[(idx + 1) % 3], second: order[(idx + 2) % 3] };
+  if (holeNumber <= half) { order = base; idx = (holeNumber - 1) % n; }
+  else { order = [...base].reverse(); idx = (holeNumber - half - 1) % n; }
+  const wolfPlayer = order[idx];
+  const others = order.filter((_, i) => i !== idx);
+  return { wolf: wolfPlayer, others };
 }
 
 // Same rotation pattern as Wolf: a settable base order, front nine walks it
 // in order, back nine walks the reversed order — used to pick who's "solo"
 // each hole in 1-1-1.
-function getOneOneOneSoloForHole(round, holeNumber) {
-  const base = (round.oneOneOneOrder && round.oneOneOneOrder.length === 3) ? round.oneOneOneOrder : playerIds();
+function getOneOneOneSoloForHole(round, holeNumber, holeCountForRound) {
+  const ids = playerIds();
+  const n = ids.length;
+  const base = (round.oneOneOneOrder && round.oneOneOneOrder.length === n) ? round.oneOneOneOrder : ids;
+  const half = Math.ceil((holeCountForRound || 18) / 2);
   let order, idx;
-  if (holeNumber <= 9) { order = base; idx = (holeNumber - 1) % 3; }
-  else { order = [...base].reverse(); idx = (holeNumber - 10) % 3; }
+  if (holeNumber <= half) { order = base; idx = (holeNumber - 1) % n; }
+  else { order = [...base].reverse(); idx = (holeNumber - half - 1) % n; }
   return order[idx];
 }
 
-function wolfHolePoints(holeData, holeNumber, round) {
+// Wolf now supports exactly 3 or 4 players. The wolf either goes it alone
+// (optionally "blind" — declared before any tee shots, for a point
+// multiplier) or teams up with exactly one of the other players, chosen by
+// player id directly (holeData.wolf.partner is 'lone' | 'blind' | a player
+// id) — this replaces the old 3-player-only 'first'/'second' scheme, which
+// assumed there were always exactly 2 non-wolf players to choose between.
+function wolfHolePoints(holeData, holeNumber, round, holeIndex, holeCountForRound) {
   const ids = playerIds();
   if (!allEntered(holeData, ids)) return null;
   const cfg = state.config.wolf;
-  const { wolf: wolfPlayer, first, second } = getWolfOrderForHole(round, holeNumber);
-  const others = ids.filter(id => id !== wolfPlayer);
+  const cmp = comparisonScores(holeData, ids, holeIndex, holeCountForRound);
+  const { wolf: wolfPlayer, others } = getWolfOrderForHole(round, holeNumber, holeCountForRound);
   const decision = (holeData.wolf && holeData.wolf.partner) || 'lone';
   const isBlind = decision === 'blind';
   const isLoneStyle = decision === 'lone' || decision === 'blind';
   let teamIds, oppIds, partnerId = null;
   if (isLoneStyle) { teamIds = [wolfPlayer]; oppIds = others; }
   else {
-    partnerId = decision === 'first' ? first : second;
+    partnerId = others.includes(decision) ? decision : others[0];
     teamIds = [wolfPlayer, partnerId];
     oppIds = others.filter(id => id !== partnerId);
   }
-  const teamBest = Math.min(...teamIds.map(id => holeData[id]));
-  const oppBest = Math.min(...oppIds.map(id => holeData[id]));
+  const teamBest = Math.min(...teamIds.map(id => cmp[id]));
+  const oppBest = Math.min(...oppIds.map(id => cmp[id]));
   const mult = isBlind ? (cfg.blindMultiplier || 2) : 1;
   const result = {}; ids.forEach(id => result[id] = 0);
   let outcome = 'tie';
@@ -348,19 +444,41 @@ function wolfHolePoints(holeData, holeNumber, round) {
   return { points: result, wolfPlayer, teamIds, oppIds, lone: isLoneStyle, blind: isBlind, partnerId, outcome, decision };
 }
 
-function oneOneOneHolePoints(holeData, holeNumber, round) {
+function oneOneOneHolePoints(holeData, holeNumber, round, holeIndex, holeCountForRound) {
   const ids = playerIds();
   if (!allEntered(holeData, ids)) return null;
   const cfg = state.config.oneOneOne;
-  const soloPlayer = getOneOneOneSoloForHole(round, holeNumber);
+  const cmp = comparisonScores(holeData, ids, holeIndex, holeCountForRound);
+  const soloPlayer = getOneOneOneSoloForHole(round, holeNumber, holeCountForRound);
   const teamIds = ids.filter(id => id !== soloPlayer);
-  const soloScore = holeData[soloPlayer];
-  const teamBest = Math.min(...teamIds.map(id => holeData[id]));
+  const soloScore = cmp[soloPlayer];
+  const teamBest = Math.min(...teamIds.map(id => cmp[id]));
   const result = {}; ids.forEach(id => result[id] = 0);
   let outcome = 'tie';
   if (soloScore < teamBest) { outcome = 'solo-win'; result[soloPlayer] = cfg.soloWin; }
   else if (teamBest < soloScore) { outcome = 'team-win'; teamIds.forEach(id => result[id] = cfg.teamWin); }
   return { points: result, soloPlayer, teamIds, outcome };
+}
+
+// Skins: the lowest (net, if handicaps on) score on a hole wins every skin
+// riding on it — that's 1 skin, plus any carried over from prior tied
+// holes. A tie for lowest carries all riding skins forward to the next
+// hole. Sequential by nature (carryIn/carryOut), so computeRound() must
+// call this hole-by-hole in order rather than independently per hole.
+function skinsHolePoints(holeData, ids, holeIndex, holeCountForRound, carryIn) {
+  if (!allEntered(holeData, ids)) return { points: null, winner: null, skinsWon: 0, carryOut: carryIn, tied: false, entered: false };
+  const cmp = comparisonScores(holeData, ids, holeIndex, holeCountForRound);
+  const vals = ids.map(id => cmp[id]);
+  const min = Math.min(...vals);
+  const winners = ids.filter(id => cmp[id] === min);
+  const result = {}; ids.forEach(id => result[id] = 0);
+  const pointValue = (state.config.skins && state.config.skins.pointValue) || 1;
+  if (winners.length === 1) {
+    const skinsWon = carryIn + 1;
+    result[winners[0]] = skinsWon * pointValue;
+    return { points: result, winner: winners[0], skinsWon, carryOut: 0, tied: false, entered: true };
+  }
+  return { points: result, winner: null, skinsWon: 0, carryOut: carryIn + 1, tied: true, entered: true };
 }
 
 function computeDailyAwards(totals) {
@@ -391,6 +509,8 @@ function computeRound(round, roundIdx) {
   let holesComplete = 0;
   const holeCount = courseFor(roundIdx).holeCount || 18;
   const isScramble = round.type === 'scramble';
+  const handicapsOn = useHandicaps();
+  let skinsCarry = 0; // running carryover — only meaningful for round.type === 'skins', walked sequentially below
 
   for (let n = 1; n <= holeCount; n++) {
     const hd = round.holes[n];
@@ -404,13 +524,24 @@ function computeRound(round, roundIdx) {
     if (isScramble) {
       const teamScore = hd.team;
       if (teamScore != null) holesComplete++;
-      perHole.push({ number: n, par, index: hc.index, scores: hd, stableford: {}, gamePoints: null, meta: null, bestBall: null, teamScore });
+      perHole.push({ number: n, par, index: hc.index, scores: hd, net: {}, strokesGiven: {}, stableford: {}, gamePoints: null, meta: null, bestBall: null, teamScore });
       continue;
     }
 
+    // Net strokes / strokes-given per player on this hole (mirrors gross
+    // when handicaps are off) — used for the scorecard's Net Score row and
+    // small stroke-dot indicators, independent of which game is running.
+    const net = {};
+    const strokesGiven = {};
+    ids.forEach(id => {
+      strokesGiven[id] = handicapsOn ? strokesReceivedOnHole(playerHandicap(id), hc.index, holeCount) : 0;
+      net[id] = handicapsOn ? netStrokes(hd[id], playerHandicap(id), hc.index, holeCount) : hd[id];
+    });
+
     const stableford = {};
     ids.forEach(id => {
-      const pts = stablefordForScore(hd[id], par);
+      const scoreForStableford = handicapsOn ? net[id] : hd[id];
+      const pts = stablefordForScore(scoreForStableford, par);
       stableford[id] = pts;
       if (pts != null) stablefordTotals[id] += pts;
       if (hd[id] != null) strokeTotals[id] += hd[id];
@@ -418,13 +549,20 @@ function computeRound(round, roundIdx) {
 
     let gamePoints = null, meta = null;
     if (round.type === 'matchplay3') {
-      gamePoints = matchPlayHolePoints(hd, ids);
+      gamePoints = matchPlayHolePoints(hd, ids, hc.index, holeCount);
     } else if (round.type === 'wolf') {
-      const w = wolfHolePoints(hd, n, round);
+      const w = wolfHolePoints(hd, n, round, hc.index, holeCount);
       if (w) { gamePoints = w.points; meta = w; }
     } else if (round.type === '111') {
-      const o = oneOneOneHolePoints(hd, n, round);
+      const o = oneOneOneHolePoints(hd, n, round, hc.index, holeCount);
       if (o) { gamePoints = o.points; meta = o; }
+    } else if (round.type === 'skins') {
+      const s = skinsHolePoints(hd, ids, hc.index, holeCount, skinsCarry);
+      if (s.entered) {
+        gamePoints = s.points;
+        meta = { winner: s.winner, skinsWon: s.skinsWon, carryIn: skinsCarry, carryOut: s.carryOut, tied: s.tied };
+        skinsCarry = s.carryOut;
+      }
     }
     // 'none' (No Game) rounds never produce gamePoints — strokes/Stableford
     // still accrue above, but there's no game-points/winner logic.
@@ -442,7 +580,7 @@ function computeRound(round, roundIdx) {
       bestBallHolesCounted++;
     }
 
-    perHole.push({ number: n, par, index: hc.index, scores: hd, stableford, gamePoints, meta, bestBall });
+    perHole.push({ number: n, par, index: hc.index, scores: hd, net, strokesGiven, stableford, gamePoints, meta, bestBall });
   }
 
   const dailyAwards = (!isScramble && holesComplete > 0) ? computeDailyAwards(rawGameTotals) : Object.fromEntries(ids.map(id => [id, 0]));
@@ -516,6 +654,7 @@ function computeStats(computed, rounds) {
     loneWolfW: 0, loneWolfL: 0, loneWolfT: 0,
     teammateW: 0, teammateL: 0, teammateT: 0,
     oneOneOneSoloWins: 0, oneOneOneTeamWins: 0,
+    skinsWon: 0, skinsPointsWon: 0,
     ctpWins: 0, ldWins: 0,
     tournamentWins: 0, tournamentRunnerUps: 0,
     bestRoundScore: null, bestRoundLabel: '',
@@ -589,6 +728,11 @@ function computeStats(computed, rounds) {
         const m = h.meta;
         if (m.outcome === 'solo-win') stats[m.soloPlayer].oneOneOneSoloWins++;
         else if (m.outcome === 'team-win') m.teamIds.forEach(id => stats[id].oneOneOneTeamWins++);
+      }
+
+      if (round.type === 'skins' && h.meta && h.meta.winner) {
+        stats[h.meta.winner].skinsWon++;
+        stats[h.meta.winner].skinsPointsWon += (h.meta.skinsWon || 1) * ((state.config.skins && state.config.skins.pointValue) || 1);
       }
     });
   });
@@ -782,13 +926,15 @@ function holeColClasses(course, n) {
   return cls.join(' ');
 }
 
-function wolfCompactCell(round, n) {
+function wolfCompactCell(round, n, holeCountForRound) {
   const decision = (round.holes[n].wolf && round.holes[n].wolf.partner) || 'lone';
-  const { wolf, first, second } = getWolfOrderForHole(round, n);
+  const { wolf, others } = getWolfOrderForHole(round, n, holeCountForRound);
   const wIn = initial(wolf);
   if (decision === 'blind') return `<span class="indicator-blind">${wIn}⚡</span>`;
   if (decision === 'lone') return wIn;
-  const partnerId = decision === 'first' ? first : second;
+  // decision holds the chosen partner's player id directly when it's
+  // neither 'lone' nor 'blind' — works for both 3- and 4-player Wolf.
+  const partnerId = others.includes(decision) ? decision : others[0];
   return `${wIn}+${initial(partnerId)}`;
 }
 
@@ -872,7 +1018,9 @@ function renderRoundsView() {
         const v = h.scores[id];
         if (v != null) { if (h.number <= 9) strokeOut += v; else strokeIn += v; }
         const cls = scoreCategoryClass(v, h.par);
-        return `<td class="score-cell ${cls} ${holeColClasses(course, h.number)}">${v != null ? v : '–'}</td>`;
+        const given = useHandicaps() ? (h.strokesGiven[id] || 0) : 0;
+        const dots = given > 0 ? '<span class="net-dot"></span>'.repeat(given) : '';
+        return `<td class="score-cell ${cls} ${holeColClasses(course, h.number)}">${v != null ? v : '–'}${dots}</td>`;
       });
       html += assembleRow(
         `<td>${playerName(id)} <span class="toggle-caret">▾</span></td>`,
@@ -895,6 +1043,14 @@ function renderRoundsView() {
       html += assembleRow('<td>Stableford Points</td>', sfCells, holeCount,
         `<td class="out-col">${fmtOrBlank(sfOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(sfOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(sfOutIn.total)}</td>`,
         `subrow ${collapsed ? 'hidden-row' : ''}`);
+
+      if (useHandicaps()) {
+        const netOutIn = sumOutInTotal(rc.perHole, h => h.net[id]);
+        const netCells = rc.perHole.map(h => { const v = h.net[id]; return `<td class="${holeColClasses(course, h.number)}">${v != null ? v : ''}</td>`; });
+        html += assembleRow('<td>Net Score</td>', netCells, holeCount,
+          `<td class="out-col">${fmtOrBlank(netOutIn.out)}</td>`, `<td class="in-col">${fmtOrBlank(netOutIn.inn)}</td>`, `<td class="total-col">${fmtOrBlank(netOutIn.total)}</td>`,
+          `subrow ${collapsed ? 'hidden-row' : ''}`);
+      }
     });
 
     if (round.type === 'matchplay3') {
@@ -906,13 +1062,24 @@ function renderRoundsView() {
     }
 
     if (round.type === 'wolf') {
-      const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number)}</td>`);
+      const wCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${wolfCompactCell(round, h.number, holeCount)}</td>`);
       html += assembleRow('<td>🐺 Wolf</td>', wCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
     }
 
     if (round.type === '111') {
-      const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(getOneOneOneSoloForHole(round, h.number))}</td>`);
+      const mCells = rc.perHole.map(h => `<td class="${holeColClasses(course, h.number)}">${initial(getOneOneOneSoloForHole(round, h.number, holeCount))}</td>`);
       html += assembleRow('<td>Solo</td>', mCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
+    }
+
+    if (round.type === 'skins') {
+      const pointValue = (state.config.skins && state.config.skins.pointValue) || 1;
+      const sCells = rc.perHole.map(h => {
+        if (!h.meta) return `<td class="${holeColClasses(course, h.number)}"></td>`;
+        if (h.meta.winner) return `<td class="${holeColClasses(course, h.number)}"><span class="skin-won">${initial(h.meta.winner)}${h.meta.skinsWon > 1 ? ` ×${h.meta.skinsWon}` : ''}</span></td>`;
+        if (h.meta.tied) return `<td class="${holeColClasses(course, h.number)}"><span class="skin-carry">carry →</span></td>`;
+        return `<td class="${holeColClasses(course, h.number)}"></td>`;
+      });
+      html += assembleRow(`<td>💰 Skins (${pointValue} pt ea)</td>`, sCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
     }
   }
 
@@ -979,6 +1146,10 @@ function gameNoteForHole(round, h) {
     return `${playerName(m.wolfPlayer)}+${playerName(m.partnerId)}`;
   }
   if (round.type === '111' && h.meta) return `${playerName(h.meta.soloPlayer)} solo`;
+  if (round.type === 'skins' && h.meta) {
+    if (h.meta.winner) return `${playerName(h.meta.winner)} wins ${h.meta.skinsWon} skin${h.meta.skinsWon === 1 ? '' : 's'}`;
+    if (h.meta.tied) return 'tied — carries over';
+  }
   return '';
 }
 
@@ -999,7 +1170,7 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
         // game/Stableford/CTP/LD to report since Scramble is just for fun.
         rows.push([
           yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
-          'Team', h.teamScore != null ? h.teamScore : '',
+          'Team', h.teamScore != null ? h.teamScore : '', '',
           '', '', '', '', ''
         ]);
         return;
@@ -1009,6 +1180,7 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
         rows.push([
           yearLabel, round.label, course.name, round.gameName, round.date || '', h.number, h.par, h.index,
           playerName(id), h.scores[id] != null ? h.scores[id] : '',
+          config.useHandicaps ? (h.net[id] != null ? h.net[id] : '') : '',
           h.gamePoints ? (h.gamePoints[id] != null ? h.gamePoints[id] : '') : '',
           h.stableford[id] != null ? h.stableford[id] : '',
           note, ctpWinner, ldWinner
@@ -1021,7 +1193,7 @@ function csvRowsForSnapshot(yearLabel, config, rounds) {
 }
 
 function exportRoomCSV() {
-  const header = ['Year', 'Round', 'Course', 'Game', 'Date', 'Hole', 'Par', 'Index', 'Player', 'Strokes', 'GamePoints', 'StablefordPoints', 'GameNote', 'CTPWinner', 'DriveWinner'];
+  const header = ['Year', 'Round', 'Course', 'Game', 'Date', 'Hole', 'Par', 'Index', 'Player', 'Strokes', 'NetStrokes', 'GamePoints', 'StablefordPoints', 'GameNote', 'CTPWinner', 'DriveWinner'];
   const liveSrc = liveRoomState || state;
   let rows = [header];
   rows = rows.concat(csvRowsForSnapshot(liveSrc.year, liveSrc.config, liveSrc.rounds));
@@ -1043,7 +1215,7 @@ function computeStatsForSnapshot(snapshot) {
 
 const LIFETIME_SUM_KEYS = ['birdies', 'pars', 'bogeys', 'eagles', 'albatrosses', 'dailyWins', 'mp3Wins', 'mp3Ties',
   'wolfChosenAsTeammate', 'loneWolfW', 'loneWolfL', 'loneWolfT', 'teammateW', 'teammateL', 'teammateT',
-  'oneOneOneSoloWins', 'oneOneOneTeamWins', 'ctpWins', 'ldWins', 'tournamentWins', 'tournamentRunnerUps'];
+  'oneOneOneSoloWins', 'oneOneOneTeamWins', 'skinsWon', 'skinsPointsWon', 'ctpWins', 'ldWins', 'tournamentWins', 'tournamentRunnerUps'];
 
 function computeLifetimeStats() {
   const liveSrc = liveRoomState || state;
@@ -1111,6 +1283,9 @@ function renderStats() {
     ]);
     html += statGroup('1-1-1', [
       ['Holes won solo', s.oneOneOneSoloWins], ['Holes won w/ teammate', s.oneOneOneTeamWins]
+    ]);
+    html += statGroup('Skins', [
+      ['Skins won', s.skinsWon], ['Skins points won', fmtNum(s.skinsPointsWon)]
     ]);
     html += statGroup('Side Games', [
       ['Closest to the Pin wins', s.ctpWins], ['Longest Drive wins', s.ldWins]
@@ -1409,11 +1584,11 @@ function switchRoomView() {
 
 function applyRemoteRoomRow(row) {
   cloudSync.applyingRemote = true;
-  if (row.config && row.config.courses) row.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-  migrateRounds(row.rounds);
+  if (row.config) migrateConfig(row.config);
+  migrateRoundsForConfig(row.rounds, row.config);
   (row.archived_seasons || []).forEach(s => {
-    if (s.config && s.config.courses) s.config.courses.forEach(c => { if (!c.holeCount) c.holeCount = c.holes ? c.holes.length : 18; });
-    migrateRounds(s.rounds);
+    if (s.config) migrateConfig(s.config);
+    migrateRoundsForConfig(s.rounds, s.config);
   });
   const target = isViewingLive() ? state : liveRoomState;
   if (target) {
@@ -1588,8 +1763,8 @@ function blankRoundsPreservingSettings() {
     const holeCount = courseFor(i + 1).holeCount || 18;
     const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null,
       date: null, excludeFromLifetime: false, tournamentWinner: null };
-    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === 3) ? r.wolfOrder.slice() : playerIds();
-    if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === 3) ? r.oneOneOneOrder.slice() : playerIds();
+    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === playerIds().length) ? r.wolfOrder.slice() : playerIds();
+    if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === playerIds().length) ? r.oneOneOneOrder.slice() : playerIds();
     for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
     return fresh;
   });
@@ -1947,16 +2122,16 @@ function applyReadyGate() {
 /* ---------------------------------------------------------------
    RENDERING — MASTER SETTINGS
 ---------------------------------------------------------------- */
-const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', none: 'No Game', scramble: 'Scramble' };
+const GAME_TYPE_LABELS = { matchplay3: 'Match Play', wolf: 'Wolf', '111': '1-1-1', skins: 'Skins', none: 'No Game', scramble: 'Scramble' };
 
 function courseCard(roundIdx, dis) {
   dis = dis || '';
   const c = courseFor(roundIdx);
   const round = state.rounds[roundIdx - 1];
-  // Wolf's tee-rotation math only works for exactly 3 players — hide it from
-  // the picker otherwise rather than let someone select a game that will
-  // silently misbehave.
-  const availableTypes = Object.keys(GAME_TYPE_LABELS).filter(t => t !== 'wolf' || state.config.players.length === 3);
+  // Wolf's tee-rotation math now works for 3 or 4 players — hide it from
+  // the picker outside that range rather than let someone select a game
+  // that will silently misbehave.
+  const availableTypes = Object.keys(GAME_TYPE_LABELS).filter(t => t !== 'wolf' || [3, 4].includes(state.config.players.length));
   const typeOpts = availableTypes.map(val =>
     `<option value="${val}" ${round.type === val ? 'selected' : ''}>${GAME_TYPE_LABELS[val]}</option>`).join('');
   const isScramble = round.type === 'scramble';
@@ -1997,28 +2172,36 @@ function courseCard(roundIdx, dis) {
   </div>`;
 }
 
-// If the player count isn't exactly 3, Wolf can't run (its tee-order math
-// is fixed to 3 players) — auto-convert any Wolf round to Match Play rather
-// than leave it silently broken.
+// Wolf now supports exactly 3 or 4 players (its tee-order rotation math
+// works for either). If the roster moves outside that range, auto-convert
+// any Wolf round to Match Play rather than leave it silently broken. Also
+// repairs a stale wolfOrder length whenever the roster changes but stays
+// within 3–4 (e.g. going from 3 to 4 players) — the order array must
+// always match the current player count or getWolfOrderForHole falls back
+// to un-set defaults.
 function enforceWolfPlayerConstraint() {
-  if (state.config.players.length === 3) return;
+  const n = state.config.players.length;
+  const wolfEligible = n === 3 || n === 4;
   let changed = false;
   state.rounds.forEach(r => {
-    if (r.type === 'wolf') {
+    if (r.type === 'wolf' && !wolfEligible) {
       r.type = 'matchplay3';
       r.gameName = GAME_TYPE_LABELS['matchplay3'];
       delete r.wolfOrder;
       changed = true;
+    } else if (r.type === 'wolf' && (!r.wolfOrder || r.wolfOrder.length !== n)) {
+      r.wolfOrder = playerIds();
+      changed = true;
     }
   });
-  if (changed) showToast('Wolf requires exactly 3 players — affected rounds switched to Match Play');
+  if (changed && !wolfEligible) showToast('Wolf requires 3 or 4 players — affected rounds switched to Match Play');
 }
 
 function addPlayer() {
   if (state.config.players.length >= MAX_PLAYERS) { showToast(`Maximum ${MAX_PLAYERS} players`); return; }
   const n = state.config.players.length + 1;
   const id = 'p' + n;
-  state.config.players.push({ id, name: `Player ${n}` });
+  state.config.players.push({ id, name: `Player ${n}`, handicap: 0 });
   state.rounds.forEach(r => { Object.values(r.holes).forEach(h => { if (!(id in h) && r.type !== 'scramble') h[id] = null; }); });
   enforceWolfPlayerConstraint();
   saveState(); renderAll();
@@ -2097,16 +2280,24 @@ function renderGameSettings() {
     html += `<p class="helper-text">You have view-only access — these settings are read-only for you.</p>`;
   }
 
-  html += `<div class="card"><p class="eyebrow">Players (${c.players.length})</p>`;
+  html += `<div class="card"><p class="eyebrow">Players &amp; Handicaps (${c.players.length})</p>`;
   c.players.forEach((p, i) => {
-    html += `<div class="field"><label>Player ${i + 1} Name</label><input type="text" data-player-idx="${i}" class="cfgPlayerName" value="${escapeHtml(p.name)}" ${dis}></div>`;
+    html += `<div class="player-field-row">
+      <div class="field player-name-field"><label>Player ${i + 1} Name</label><input type="text" data-player-idx="${i}" class="cfgPlayerName" value="${escapeHtml(p.name)}" ${dis}></div>
+      <div class="field player-hcp-field"><label>Handicap</label><input type="number" step="0.1" data-player-idx="${i}" class="cfgPlayerHandicap" value="${p.handicap != null ? p.handicap : 0}" ${dis}></div>
+    </div>`;
   });
+  html += `<div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0;">
+      <input type="checkbox" id="cfgUseHandicaps" ${c.useHandicaps ? 'checked' : ''} style="width:auto;" ${dis}>
+      <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Use handicaps for scoring (net strokes)</label>
+    </div>
+    <p class="helper-text" style="margin-top:8px;">When on, Match Play, Wolf, 1-1-1, Skins, and Stableford all compare net strokes — each player gets a stroke on their hardest holes by stroke index, based on the handicap above. Gross strokes are still what you enter and what the scorecard tracks; Scramble is unaffected (it has no individual strokes).</p>`;
   if (editable) {
-    html += `<div class="field-row">
+    html += `<div class="field-row" style="margin-top:14px;">
       <button class="btn btn-secondary" id="addPlayerBtn" style="flex:1;" ${c.players.length >= MAX_PLAYERS ? 'disabled' : ''}>+ Add Player</button>
       <button class="btn btn-ghost" id="removePlayerBtn" style="flex:1;" ${c.players.length <= MIN_PLAYERS ? 'disabled' : ''}>− Remove Last</button>
     </div>
-    ${c.players.length !== 3 ? '<p class="helper-text" style="margin-top:8px;">Wolf requires exactly 3 players and is hidden from the Game picker at this count.</p>' : ''}`;
+    ${![3, 4].includes(c.players.length) ? '<p class="helper-text" style="margin-top:8px;">Wolf requires 3 or 4 players and is hidden from the Game picker at this count.</p>' : ''}`;
   }
   html += `</div>`;
 
@@ -2143,7 +2334,7 @@ function renderGameSettings() {
     <p class="helper-text" style="margin-top:8px;">Off by default — normally each Bro can only edit their own strokes once they've picked their player in Account &amp; Rooms.</p>
   </div>`;
 
-  html += `<div class="card"><p class="eyebrow">Wolf Point Allocation (Round 2)</p>
+  html += `<div class="card"><p class="eyebrow">Wolf Point Allocation${[3,4].includes(c.players.length) ? '' : ' (3 or 4 players)'}</p>
     <div class="field-row">
       <div class="field"><label>Solo/Lone Win</label><input type="number" id="cfgWolfSoloWin" value="${c.wolf.soloWin}" ${dis}></div>
       <div class="field"><label>Team Win (each)</label><input type="number" id="cfgWolfTeamWin" value="${c.wolf.teamWin}" ${dis}></div>
@@ -2152,7 +2343,7 @@ function renderGameSettings() {
       <div class="field"><label>Opponents Win (each)</label><input type="number" id="cfgWolfOppWin" value="${c.wolf.opponentWin}" ${dis}></div>
       <div class="field"><label>Blind Wolf Multiplier</label><input type="number" step="0.5" id="cfgWolfBlindMult" value="${c.wolf.blindMultiplier}" ${dis}></div>
     </div>
-    <p class="helper-text">Blind Wolf = going lone before seeing any tee shots. Whatever the hole's points would be, they're multiplied by this value.</p>
+    <p class="helper-text">Blind Wolf = going lone before seeing any tee shots. Whatever the hole's points would be, they're multiplied by this value. Works with 3 or 4 players in the room — outside that range, Wolf rounds auto-convert to Match Play.</p>
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">1-1-1 Point Allocation (Round 3)</p>
@@ -2160,6 +2351,11 @@ function renderGameSettings() {
       <div class="field"><label>Solo Win</label><input type="number" id="cfg111Solo" value="${c.oneOneOne.soloWin}" ${dis}></div>
       <div class="field"><label>Team Win (each)</label><input type="number" id="cfg111Team" value="${c.oneOneOne.teamWin}" ${dis}></div>
     </div>
+  </div>`;
+
+  html += `<div class="card"><p class="eyebrow">Skins</p>
+    <div class="field"><label>Points per Skin</label><input type="number" step="0.5" id="cfgSkinsPointValue" value="${(c.skins && c.skins.pointValue) || 1}" ${dis}></div>
+    <p class="helper-text">Lowest score on a hole wins the skin(s) riding on it. Ties carry every skin on that hole over to the next hole.</p>
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">Round 1 Best Ball</p>
@@ -2198,10 +2394,20 @@ function renderGameSettings() {
   const removeRoundBtn = document.getElementById('removeRoundBtn');
   if (removeRoundBtn) removeRoundBtn.addEventListener('click', removeLastRound);
 
+  // Focus/tab fix: field-level edits (numbers, names, handicaps, course
+  // fields, hole grids) save + refresh every OTHER view, but deliberately
+  // do NOT call renderAll()/renderGameSettings() here — re-rendering this
+  // panel's own innerHTML on every blur was what caused the "have to
+  // select twice" / tab-not-advancing bug (see refreshNonSettingsViews
+  // doc comment below for the full explanation). Structural edits that
+  // change which fields exist (round type, hole count, PIN unlock, add/
+  // remove player or round) still do a full renderAll(), since those are
+  // infrequent, confirm()-gated actions rather than something a user tabs
+  // through field-by-field.
   const bind = (id, path, isNum) => {
     const inp = document.getElementById(id);
     if (!inp) return;
-    inp.addEventListener('change', () => { setPath(path, isNum ? Number(inp.value) : inp.value); saveState(); renderAll(); });
+    inp.addEventListener('change', () => { setPath(path, isNum ? Number(inp.value) : inp.value); saveState(); refreshNonSettingsViews(); });
   };
   bind('cfgFirst', ['dailyGame', 'first'], true);
   bind('cfgSecond', ['dailyGame', 'second'], true);
@@ -2212,33 +2418,43 @@ function renderGameSettings() {
   bind('cfgAlbatross', ['stableford', 'albatross'], true);
   bind('cfgSideGamePoints', ['sideGamePoints'], true);
   const openScoringEl = document.getElementById('cfgOpenScoring');
-  if (openScoringEl) openScoringEl.addEventListener('change', () => { state.config.openScoring = openScoringEl.checked; saveState(); renderAll(); });
+  if (openScoringEl) openScoringEl.addEventListener('change', () => { state.config.openScoring = openScoringEl.checked; saveState(); refreshNonSettingsViews(); });
   bind('cfgWolfSoloWin', ['wolf', 'soloWin'], true);
   bind('cfgWolfTeamWin', ['wolf', 'teamWin'], true);
   bind('cfgWolfOppWin', ['wolf', 'opponentWin'], true);
   bind('cfgWolfBlindMult', ['wolf', 'blindMultiplier'], true);
   bind('cfg111Solo', ['oneOneOne', 'soloWin'], true);
   bind('cfg111Team', ['oneOneOne', 'teamWin'], true);
+  bind('cfgSkinsPointValue', ['skins', 'pointValue'], true);
   bind('cfgBestBallGoal', ['bestBallGoal'], true);
+  const useHcpEl = document.getElementById('cfgUseHandicaps');
+  if (useHcpEl) useHcpEl.addEventListener('change', () => { state.config.useHandicaps = useHcpEl.checked; saveState(); refreshNonSettingsViews(); });
 
   el.querySelectorAll('.cfgPlayerName').forEach(inp => {
-    inp.addEventListener('change', () => { state.config.players[Number(inp.dataset.playerIdx)].name = inp.value; saveState(); renderAll(); });
+    inp.addEventListener('change', () => { state.config.players[Number(inp.dataset.playerIdx)].name = inp.value; saveState(); refreshNonSettingsViews(); });
+  });
+  el.querySelectorAll('.cfgPlayerHandicap').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const v = Number(inp.value);
+      state.config.players[Number(inp.dataset.playerIdx)].handicap = isNaN(v) ? 0 : v;
+      saveState(); refreshNonSettingsViews();
+    });
   });
   el.querySelectorAll('.cfgCourseName').forEach(inp => {
-    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).name = inp.value; saveState(); renderAll(); });
+    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).name = inp.value; saveState(); refreshNonSettingsViews(); });
   });
   el.querySelectorAll('.cfgCtpHole').forEach(inp => {
     inp.addEventListener('change', () => {
       const course = courseFor(Number(inp.dataset.round));
       course.ctpHole = Math.min(Math.max(1, Number(inp.value) || 1), course.holeCount || 18);
-      saveState(); renderAll();
+      saveState(); refreshNonSettingsViews();
     });
   });
   el.querySelectorAll('.cfgLdHole').forEach(inp => {
     inp.addEventListener('change', () => {
       const course = courseFor(Number(inp.dataset.round));
       course.ldHole = Math.min(Math.max(1, Number(inp.value) || 1), course.holeCount || 18);
-      saveState(); renderAll();
+      saveState(); refreshNonSettingsViews();
     });
   });
   el.querySelectorAll('.cfgRoundDate').forEach(inp => {
@@ -2279,9 +2495,9 @@ function renderGameSettings() {
         for (let n = 1; n <= holeCount; n++) holes[n] = buildEmptyHole(round);
         round.holes = holes;
       }
-      if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== 3)) round.wolfOrder = playerIds();
+      if (newType === 'wolf' && (!round.wolfOrder || round.wolfOrder.length !== playerIds().length)) round.wolfOrder = playerIds();
       if (newType !== 'wolf') delete round.wolfOrder;
-      if (newType === '111' && (!round.oneOneOneOrder || round.oneOneOneOrder.length !== 3)) round.oneOneOneOrder = playerIds();
+      if (newType === '111' && (!round.oneOneOneOrder || round.oneOneOneOrder.length !== playerIds().length)) round.oneOneOneOrder = playerIds();
       saveState(); renderAll();
     });
   });
@@ -2303,10 +2519,10 @@ function renderGameSettings() {
     });
   });
   el.querySelectorAll('.cfgHolePar').forEach(inp => {
-    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).holes[Number(inp.dataset.holeIdx)].par = Number(inp.value); saveState(); renderAll(); });
+    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).holes[Number(inp.dataset.holeIdx)].par = Number(inp.value); saveState(); refreshNonSettingsViews(); });
   });
   el.querySelectorAll('.cfgHoleIndex').forEach(inp => {
-    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).holes[Number(inp.dataset.holeIdx)].index = Number(inp.value); saveState(); renderAll(); });
+    inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).holes[Number(inp.dataset.holeIdx)].index = Number(inp.value); saveState(); refreshNonSettingsViews(); });
   });
 }
 
@@ -2415,6 +2631,21 @@ function renderAll() {
   if (settingsPanelsOpen && appReady()) { renderGameSettings(); renderAdminSettings(); }
 }
 
+// Re-renders everything EXCEPT the settings form (gameSettingsSection /
+// adminSettingsSection) — used after a settings field save so the rest of
+// the app (leaderboard, scorecard, stats, header) reflects the change
+// without rebuilding the settings panel's own inputs, which is what was
+// stealing keyboard focus / breaking Tab order (see renderGameSettings'
+// binding comment for the full explanation).
+function refreshNonSettingsViews() {
+  renderHeader();
+  renderSeasonNav();
+  renderRoundStatus();
+  renderLeaderboard();
+  renderRoundsView();
+  renderStats();
+}
+
 document.getElementById('showSettingsBtn').addEventListener('click', () => {
   settingsPanelsOpen = !settingsPanelsOpen;
   const panels = document.getElementById('settingsPanels');
@@ -2510,13 +2741,14 @@ document.getElementById('modalRoundSegmented').addEventListener('click', (e) => 
 document.getElementById('prevHoleBtn').addEventListener('click', () => { if (modalHole > 1) { modalHole--; renderModalHole(); } });
 document.getElementById('nextHoleBtn').addEventListener('click', () => { const max = courseFor(modalRound).holeCount || 18; if (modalHole < max) { modalHole++; renderModalHole(); } });
 
-function wolfChoiceLabel(round, n, value) {
-  const { wolf, first, second } = getWolfOrderForHole(round, n);
+// Wolf choice labels now work for 3 or 4 players — 'value' is either
+// 'lone', 'blind', or a partner's player id directly (replacing the old
+// 3-player-only 'first'/'second' scheme, which assumed exactly 2 other
+// players and couldn't express "pick one of 3 possible partners").
+function wolfChoiceLabel(value) {
   if (value === 'lone') return `Lone Wolf`;
-  if (value === 'blind') return `Blind Wolf (2x)`;
-  if (value === 'first') return `Team w/ ${playerName(first)} (1st off)`;
-  if (value === 'second') return `Team w/ ${playerName(second)} (2nd off)`;
-  return value;
+  if (value === 'blind') return `Blind Wolf (${state.config.wolf.blindMultiplier || 2}x)`;
+  return `Team w/ ${playerName(value)}`;
 }
 
 function renderModalHole() {
@@ -2570,9 +2802,10 @@ function renderModalHole() {
   const wolfOrderBlock = document.getElementById('modalWolfOrderBlock');
   if (round.type === 'wolf' && modalHole === 1) {
     wolfOrderBlock.style.display = 'block';
-    const order = (round.wolfOrder && round.wolfOrder.length === 3) ? round.wolfOrder : playerIds();
+    const n = ids.length;
+    const order = (round.wolfOrder && round.wolfOrder.length === n) ? round.wolfOrder : playerIds();
     const orderDiv = document.getElementById('modalWolfOrderInputs');
-    orderDiv.innerHTML = [0, 1, 2].map(pos => `
+    orderDiv.innerHTML = Array.from({ length: n }, (_, pos) => pos).map(pos => `
       <div class="field"><label>Position ${pos + 1}</label>
         <select class="wolfOrderSelect" data-pos="${pos}">
           ${ids.map(id => `<option value="${id}" ${order[pos] === id ? 'selected' : ''}>${playerName(id)}</option>`).join('')}
@@ -2594,9 +2827,13 @@ function renderModalHole() {
   if (oneOneOneOrderBlock) {
     if (round.type === '111' && modalHole === 1) {
       oneOneOneOrderBlock.style.display = 'block';
-      const order = (round.oneOneOneOrder && round.oneOneOneOrder.length === 3) ? round.oneOneOneOrder : playerIds();
+      // The rotation order only needs to name who's solo each hole, so its
+      // length matches player count generally (though only the first N
+      // matter — 1-1-1's "team" is just everyone else, whatever the count).
+      const n = ids.length;
+      const order = (round.oneOneOneOrder && round.oneOneOneOrder.length === n) ? round.oneOneOneOrder : playerIds();
       const orderDiv = document.getElementById('modalOneOneOneOrderInputs');
-      orderDiv.innerHTML = [0, 1, 2].map(pos => `
+      orderDiv.innerHTML = Array.from({ length: n }, (_, pos) => pos).map(pos => `
         <div class="field"><label>Position ${pos + 1}</label>
           <select class="oneOneOneOrderSelect" data-pos="${pos}">
             ${ids.map(id => `<option value="${id}" ${order[pos] === id ? 'selected' : ''}>${playerName(id)}</option>`).join('')}
@@ -2648,24 +2885,37 @@ function renderModalHole() {
 
   const wolfBlock = document.getElementById('modalWolfBlock');
   const matchupBlock = document.getElementById('modalMatchupBlock');
+  const holeCountForModal = course.holeCount || 18;
 
   if (round.type === 'wolf') {
     wolfBlock.style.display = 'block';
     matchupBlock.style.display = 'none';
-    const { wolf: wolfPlayer, first, second } = getWolfOrderForHole(round, modalHole);
+    const { wolf: wolfPlayer, others } = getWolfOrderForHole(round, modalHole, holeCountForModal);
     document.getElementById('modalWolfWhoText').textContent = `${playerName(wolfPlayer)} is the wolf this hole.`;
     const current = hd.wolf ? hd.wolf.partner : 'lone';
     const opts = document.getElementById('modalWolfOptions');
-    const choices = ['blind', 'first', 'second', 'lone'];
-    opts.innerHTML = choices.map(v => `<label class="radio-chip"><input type="radio" name="wolfChoice" value="${v}" ${current === v ? 'checked' : ''}><span>${wolfChoiceLabel(round, modalHole, v)}</span></label>`).join('');
+    // choices: blind, one option per possible partner (2 or 3 depending on
+    // player count), then lone — 'others' already excludes the wolf.
+    const choices = ['blind', ...others, 'lone'];
+    opts.innerHTML = choices.map(v => `<label class="radio-chip"><input type="radio" name="wolfChoice" value="${v}" ${current === v ? 'checked' : ''}><span>${wolfChoiceLabel(v)}</span></label>`).join('');
     opts.querySelectorAll('input').forEach(inp => inp.addEventListener('change', renderModalPreview));
   } else if (round.type === '111') {
     wolfBlock.style.display = 'none';
     matchupBlock.style.display = 'block';
-    const soloPlayer = getOneOneOneSoloForHole(round, modalHole);
+    const soloPlayer = getOneOneOneSoloForHole(round, modalHole, holeCountForModal);
     const teamIds = ids.filter(id => id !== soloPlayer);
     document.getElementById('modalMatchupTitle').textContent = 'Matchup';
     document.getElementById('modalMatchupText').textContent = `${playerName(soloPlayer)} (solo) vs. ${teamIds.map(playerName).join(' & ')} (team)`;
+  } else if (round.type === 'skins') {
+    wolfBlock.style.display = 'none';
+    matchupBlock.style.display = 'block';
+    document.getElementById('modalMatchupTitle').textContent = 'Skins';
+    const rc = computeRound(round, modalRound);
+    const priorHole = rc.perHole.find(h => h.number === modalHole - 1);
+    const carryIn = priorHole && priorHole.meta ? priorHole.meta.carryOut : 0;
+    document.getElementById('modalMatchupText').textContent = carryIn > 0
+      ? `${carryIn} skin${carryIn === 1 ? '' : 's'} carried in from a tie — this hole is worth ${carryIn + 1}.`
+      : `Lowest score wins the skin. A tie carries it to the next hole.`;
   } else {
     wolfBlock.style.display = 'none';
     matchupBlock.style.display = 'none';
@@ -2714,27 +2964,41 @@ function renderModalPreview() {
   }
   resultBlock.style.display = 'block';
 
+  const hc = holeConfig(modalRound, modalHole);
+  const holeCount = courseFor(modalRound).holeCount || 18;
+  const ids = playerIds();
+
   if (round.type === 'matchplay3') {
     resultTitle.textContent = 'Match Play Result';
-    const pts = matchPlayHolePoints(temp, playerIds());
-    if (!pts) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
-    const parts = playerIds().map(id => `${playerName(id)}: ${fmtNum(pts[id])} pt${pts[id] === 1 ? '' : 's'}`);
+    const pts = matchPlayHolePoints(temp, ids, hc.index, holeCount);
+    if (!pts) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
+    const parts = ids.map(id => `${playerName(id)}: ${fmtNum(pts[id])} pt${pts[id] === 1 ? '' : 's'}`);
     resultText.textContent = parts.join(' · ');
   } else if (round.type === 'wolf') {
     resultTitle.textContent = 'Wolf Result';
-    const w = wolfHolePoints(temp, modalHole, round);
-    if (!w) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    const w = wolfHolePoints(temp, modalHole, round, hc.index, holeCount);
+    if (!w) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     const tag = w.blind ? ' (blind — doubled!)' : '';
     if (w.outcome === 'team-win') resultText.textContent = `${w.teamIds.map(playerName).join(' & ')} win the hole${tag}.`;
     else if (w.outcome === 'opp-win') resultText.textContent = `${w.oppIds.map(playerName).join(' & ')} beat the wolf${tag}.`;
     else resultText.textContent = 'Hole tied — no points awarded.';
   } else if (round.type === '111') {
     resultTitle.textContent = '1-1-1 Result';
-    const o = oneOneOneHolePoints(temp, modalHole, round);
-    if (!o) { resultText.textContent = 'Enter all three strokes to see the result.'; return; }
+    const o = oneOneOneHolePoints(temp, modalHole, round, hc.index, holeCount);
+    if (!o) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
     if (o.outcome === 'solo-win') resultText.textContent = `${playerName(o.soloPlayer)} wins solo (+${state.config.oneOneOne.soloWin}).`;
     else if (o.outcome === 'team-win') resultText.textContent = `${o.teamIds.map(playerName).join(' & ')} win as a team (+${state.config.oneOneOne.teamWin} each).`;
     else resultText.textContent = 'Hole tied — no points awarded.';
+  } else if (round.type === 'skins') {
+    resultTitle.textContent = 'Skins Result';
+    if (!allEntered(temp, ids)) { resultText.textContent = 'Enter all strokes to see the result.'; return; }
+    const rc = computeRound(round, modalRound);
+    const priorHole = rc.perHole.find(h => h.number === modalHole - 1);
+    const carryIn = priorHole && priorHole.meta ? priorHole.meta.carryOut : 0;
+    const s = skinsHolePoints(temp, ids, hc.index, holeCount, carryIn);
+    const pointValue = (state.config.skins && state.config.skins.pointValue) || 1;
+    if (s.winner) resultText.textContent = `${playerName(s.winner)} wins ${s.skinsWon} skin${s.skinsWon === 1 ? '' : 's'} (${fmtNum(s.skinsWon * pointValue)} pts).`;
+    else resultText.textContent = `Tied — ${carryIn + 1} skin${carryIn + 1 === 1 ? '' : 's'} carr${carryIn + 1 === 1 ? 'ies' : 'y'} over to the next hole.`;
   }
 }
 
