@@ -1187,25 +1187,25 @@ function csvRoundBlock(round, ri, computed, config) {
   // Line 1: Round label, course, date, game name, CTP/LD hole+winner.
   rows.push([
     round.label, course.name, round.date || '', round.gameName, '',
-    '"CTP:" ', isScramble ? '' : course.ctpHole, isScramble ? '' : ctpWinner, '',
-    '"Longest Drive:"', isScramble ? '' : course.ldHole, isScramble ? '' : ldWinner, ''
+    'CTP:', isScramble ? '' : course.ctpHole, isScramble ? '' : ctpWinner, '',
+    'Longest Drive:', isScramble ? '' : course.ldHole, isScramble ? '' : ldWinner, ''
   ]);
 
   // Line 2: Hole header row (always shows all 18 columns per the template;
   // holes beyond the round's actual hole count are simply left blank).
-  const holeHeaderRow = ['"Hole"'];
+  const holeHeaderRow = ['Hole'];
   for (let n = 1; n <= 18; n++) holeHeaderRow.push(n <= holeCount ? n : '');
-  holeHeaderRow.push('"Total"', '"Stableford Points"', '"Daily Game Points"');
+  holeHeaderRow.push('Total', 'Stableford Points', 'Daily Game Points');
   rows.push(holeHeaderRow);
 
   // Line 3: Par row.
-  const parRow = ['"Par"'];
+  const parRow = ['Par'];
   for (let n = 1; n <= 18; n++) parRow.push(n <= holeCount ? holeConfig(ri + 1, n).par : '');
   parRow.push('');
   rows.push(parRow);
 
   // Line 4: Index row.
-  const idxRow = ['"Index"'];
+  const idxRow = ['Index'];
   for (let n = 1; n <= 18; n++) idxRow.push(n <= holeCount ? holeConfig(ri + 1, n).index : '');
   idxRow.push('');
   rows.push(idxRow);
@@ -1236,7 +1236,7 @@ function csvRoundBlock(round, ri, computed, config) {
 
     // Game indicator row — blank for "No Game" rounds (nothing to show).
     if (round.type !== 'none') {
-      const gameRow = ['"Game"'];
+      const gameRow = ['Game'];
       for (let n = 1; n <= 18; n++) {
         const h = rc.perHole[n - 1];
         gameRow.push((h && n <= holeCount) ? gameIndicatorForHole(round, h, holeCount) : '');
