@@ -1787,7 +1787,7 @@ async function loadAndRenderMembers() {
 }
 
 /* ---------------------------------------------------------------
-   SEASON NAVIGATION — Previous / Next year
+   SEASON NAVIGATION — Previous / Next season
 ---------------------------------------------------------------- */
 let liveRoomState = null;
 let viewingSeasonKey = null;
@@ -1843,6 +1843,34 @@ function blankRoundsPreservingSettings() {
   });
 }
 
+// Admin-only: rename whichever season is currently in view — the live
+// season (state.year directly) or an archived one (found via its stable
+// archivedAt key, since archived seasons live in liveRoomState while a
+// past season is being browsed). Blocks renaming to a name already used
+// by another season in this room, live or archived, since navigation and
+// backfill both key off uniqueness of the name.
+function renameCurrentSeason(newName) {
+  if (!newName) { showToast('Enter a season name'); return; }
+  const root = liveRoomState || state;
+  const liveNameTaken = !isViewingLive() && String(root.year) === newName;
+  const archivedNameTaken = root.archivedSeasons.some(s =>
+    String(s.year) === newName && !(!isViewingLive() && s.archivedAt === viewingSeasonKey)
+  );
+  if (liveNameTaken || archivedNameTaken) { showToast('That name is already used by another season'); return; }
+
+  if (isViewingLive()) {
+    state.year = newName;
+  } else {
+    const season = root.archivedSeasons.find(s => s.archivedAt === viewingSeasonKey);
+    if (!season) return;
+    season.year = newName;
+    state.year = newName;
+  }
+  saveState();
+  renderAll();
+  showToast('Season renamed');
+}
+
 async function archiveAndStartNewYear(newYearLabel) {
   state.archivedSeasons.push({ year: state.year, config: JSON.parse(JSON.stringify(state.config)), rounds: JSON.parse(JSON.stringify(state.rounds)), archivedAt: Date.now() });
   const oldYear = state.year;
@@ -1854,7 +1882,7 @@ async function archiveAndStartNewYear(newYearLabel) {
 }
 
 function addBacklogYear(label) {
-  if (state.archivedSeasons.some(s => String(s.year) === String(label))) { showToast('That year already exists'); return; }
+  if (state.archivedSeasons.some(s => String(s.year) === String(label))) { showToast('A season with that name already exists'); return; }
   const fresh = emptyRoomState();
   fresh.config.players = JSON.parse(JSON.stringify(state.config.players));
   state.archivedSeasons.push({ year: label, config: fresh.config, rounds: fresh.rounds, archivedAt: Date.now() });
@@ -1890,14 +1918,14 @@ function renderSeasonNav() {
   const canNext = !isViewingLive();
   const showDelete = !isViewingLive() && isAdmin();
   el.innerHTML = `<div class="season-nav">
-    <button class="round-nav-btn" id="seasonPrevBtn" ${canPrev ? '' : 'disabled'} aria-label="Previous year">
+    <button class="round-nav-btn" id="seasonPrevBtn" ${canPrev ? '' : 'disabled'} aria-label="Previous season">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
     </button>
     <span class="season-nav-label">${escapeHtml(label)}${!isViewingLive() ? (isAdmin() ? ' <small>editing</small>' : ' <small>read-only</small>') : ''}</span>
-    <button class="round-nav-btn" id="seasonNextBtn" ${canNext ? '' : 'disabled'} aria-label="Next year">
+    <button class="round-nav-btn" id="seasonNextBtn" ${canNext ? '' : 'disabled'} aria-label="Next season">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </button>
-    ${showDelete ? `<button class="round-nav-btn" id="seasonDeleteBtn" aria-label="Delete this year" style="color:var(--rust);">
+    ${showDelete ? `<button class="round-nav-btn" id="seasonDeleteBtn" aria-label="Delete this season" style="color:var(--rust);">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z"/></svg>
     </button>` : ''}
   </div>`;
@@ -1907,7 +1935,7 @@ function renderSeasonNav() {
   if (prevBtn) prevBtn.addEventListener('click', () => navigateSeason(-1));
   if (nextBtn) nextBtn.addEventListener('click', () => navigateSeason(1));
   if (delBtn) delBtn.addEventListener('click', () => {
-    const typed = prompt(`This permanently deletes all "${state.year}" data. Type the year to confirm:`);
+    const typed = prompt(`This permanently deletes all "${state.year}" data. Type the season name to confirm:`);
     if (typed !== String(state.year)) { if (typed !== null) showToast('Did not match — not deleted'); return; }
     const key = viewingSeasonKey;
     deleteArchivedYear(key);
@@ -2630,10 +2658,12 @@ function renderAdminSettings() {
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">Season Archive</p>
-    <p class="helper-text" style="margin:0 0 10px;">Current year: <b>${escapeHtml(state.year)}</b>. Archiving snapshots this year's final scores, then clears the scorecards for the next trip. Everyone can browse archived years from Home using the ‹ › arrows, and you can edit past years there too. Use the trash icon next to an archived year's name on Home to delete it permanently (the live year can't be deleted here).</p>
-    <button class="btn btn-secondary btn-block" id="startNewYearBtn">Archive "${escapeHtml(state.year)}" &amp; Start New Year</button>
-    <button class="btn btn-ghost btn-block" id="addBacklogYearBtn" style="margin-top:10px;">+ Add a Past Year (Backfill)</button>
-    <p class="helper-text" style="margin-top:8px;">Adds a blank year to the archive so you can go fill in old scores you never entered — use the ‹ › arrows on Home to open it.</p>
+    <div class="field"><label>${isViewingLive() ? 'Current Season Name' : 'This Season\'s Name'}</label><input type="text" id="cfgSeasonName" value="${escapeHtml(state.year)}" placeholder="e.g. 2027 or The Masters at Pebble"></div>
+    <button class="btn btn-secondary btn-block" id="saveSeasonNameBtn">Save Season Name</button>
+    <p class="helper-text" style="margin:10px 0;">Seasons no longer have to be a year — call this trip whatever you like. Archiving snapshots this season's final scores, then clears the scorecards for the next trip. Everyone can browse past seasons from Home using the ‹ › arrows, and you can edit them there too. Use the trash icon next to an archived season's name on Home to delete it permanently (the live season can't be deleted here).</p>
+    <button class="btn btn-secondary btn-block" id="startNewYearBtn">Archive "${escapeHtml(state.year)}" &amp; Start New Season</button>
+    <button class="btn btn-ghost btn-block" id="addBacklogYearBtn" style="margin-top:10px;">+ Add a Past Season (Backfill)</button>
+    <p class="helper-text" style="margin-top:8px;">Adds a blank season to the archive so you can go fill in old scores you never entered — use the ‹ › arrows on Home to open it.</p>
   </div>`;
 
   html += `<div class="card"><p class="eyebrow" style="color:var(--rust);">Danger Zone</p>
@@ -2649,15 +2679,19 @@ function renderAdminSettings() {
     updateRoomSettings(document.getElementById('cfgRoomName').value, document.getElementById('cfgRoomPassword').value);
   });
   loadAndRenderMembers();
+  document.getElementById('saveSeasonNameBtn').addEventListener('click', () => {
+    const val = document.getElementById('cfgSeasonName').value.trim();
+    renameCurrentSeason(val);
+  });
   document.getElementById('startNewYearBtn').addEventListener('click', () => {
     const guess = (() => { const n = parseInt(state.year, 10); return isNaN(n) ? '' : String(n + 1); })();
-    const label = prompt('Label for the new year (e.g. "2028"):', guess);
+    const label = prompt('Name for the new season (e.g. "2028" or "Spring Trip"):', guess);
     if (!label) return;
     if (!confirm(`Archive "${state.year}" and reset all scores for "${label}"? This can't be undone.`)) return;
     archiveAndStartNewYear(label);
   });
   document.getElementById('addBacklogYearBtn').addEventListener('click', () => {
-    const label = prompt('Which year are you backfilling? (e.g. "2023")');
+    const label = prompt('Name for the season you\'re backfilling (e.g. "2023" or "Fall Classic"):');
     if (!label) return;
     addBacklogYear(label);
   });
@@ -2785,7 +2819,7 @@ function openScoreModal() {
   const body = document.getElementById('modalScoreBody');
   if (!canEditAnyScore()) {
     const gateText = document.getElementById('modalLoginGateText');
-    if (!isViewingLive()) gateText.textContent = `You're viewing ${state.year} in read-only mode. Jump back to the live year on Home to enter scores.`;
+    if (!isViewingLive()) gateText.textContent = `You're viewing ${state.year} in read-only mode. Jump back to the live season on Home to enter scores.`;
     else if (appReady() && myRole() === 'viewer') gateText.textContent = `You have view-only access to this room — ask the admin to change your permission if you need to enter scores.`;
     else gateText.textContent = `You need to sign in and join or create a room before you can enter scores. Head to Settings → Account & Rooms.`;
     gate.style.display = 'block';
