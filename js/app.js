@@ -2341,6 +2341,97 @@ function applyReadyGate() {
 const GAME_TYPE_LABELS = { none: '~ No Game ~', matchplay3: 'Match Play', wolf: 'Wolf', '111': '6-6-6', skins: 'Skins', scramble: 'Scramble' };
 const GAME_TYPE_ORDER = ['none', 'matchplay3', 'wolf', '111', 'skins', 'scramble'];
 
+/* ---------------------------------------------------------------
+   COURSE COMBO — searchable course picker (text input + filtered
+   dropdown list), replacing a plain <select> so the shared course
+   library stays usable once it has more than a handful of entries.
+---------------------------------------------------------------- */
+
+// Applies a chosen library course to a round's course config — shared by
+// both the combo box's "pick a result" flow and anywhere else that needs
+// to load a saved course onto a round (e.g. the course editor's Save).
+function applyLibraryCourseToRound(roundIdx, lib) {
+  const course = courseFor(roundIdx);
+  const round = state.rounds[roundIdx - 1];
+  course.courseId = lib.id;
+  course.name = lib.name;
+  course.holes = holesForSet(lib.holes, course.holeSet || '18');
+  const newCount = holeSetToCount(course.holeSet || '18');
+  resizeCourseHoles(course, newCount);
+  resizeRoundHoles(round, newCount);
+  saveState();
+}
+
+// Wires up one course-combo-input: typing filters courseLibrary by
+// substring match (case-insensitive) and shows results in the adjacent
+// .course-combo-list; picking a result loads that course onto the round
+// (same confirm-and-load behavior the old <select> had). The input's
+// current text is purely for searching — the round's actual courseId
+// only changes when a result is clicked, so typing and then clicking
+// away without picking anything leaves the round's course untouched.
+function wireCourseCombo(inp) {
+  const roundIdx = Number(inp.dataset.round);
+  const wrap = inp.closest('.course-combo');
+  const list = wrap.querySelector('.course-combo-list');
+  const clearBtn = wrap.querySelector('.course-combo-clear');
+
+  function renderResults() {
+    const q = inp.value.trim().toLowerCase();
+    const matches = q
+      ? courseLibrary.filter(lc => lc.name.toLowerCase().includes(q)).slice(0, 30)
+      : courseLibrary.slice(0, 30);
+    if (!matches.length) {
+      list.innerHTML = `<div class="course-combo-empty">${courseLibrary.length ? 'No matching courses' : 'No saved courses yet — use "+ Add New Course" below'}</div>`;
+    } else {
+      list.innerHTML = matches.map(lc => `<div class="course-combo-item" data-id="${lc.id}">${escapeHtml(lc.name)}</div>`).join('');
+    }
+    list.style.display = 'block';
+  }
+
+  inp.addEventListener('focus', renderResults);
+  inp.addEventListener('input', () => {
+    // Typing implies the person is searching, not confirming the current
+    // selection — detach any stale courseId match visually by clearing
+    // the stored id on the input itself (the round's real courseId only
+    // changes on click, per the doc comment above).
+    inp.dataset.courseId = '';
+    renderResults();
+  });
+  inp.addEventListener('blur', () => {
+    // Delay so a click on a list item registers before the list is hidden.
+    setTimeout(() => {
+      list.style.display = 'none';
+      // If they typed something but never picked a result, and it doesn't
+      // match the currently-loaded course, revert the text back to
+      // whatever's actually loaded rather than leaving stray search text.
+      const course = courseFor(roundIdx);
+      const loadedName = course.courseId ? (findCourseInLibrary(course.courseId)?.name || course.name) : '';
+      if (inp.value !== loadedName) inp.value = loadedName;
+    }, 150);
+  });
+  list.addEventListener('pointerdown', (e) => {
+    // pointerdown (not click) so this fires before the input's blur handler
+    // on both mouse and touch — critical since this is primarily a mobile app.
+    const item = e.target.closest('.course-combo-item');
+    if (!item) return;
+    e.preventDefault();
+    const lib = findCourseInLibrary(item.dataset.id);
+    if (!lib) return;
+    const course = courseFor(roundIdx);
+    if (lib.id === course.courseId) { list.style.display = 'none'; return; }
+    if (!confirm(`Load "${lib.name}"? This replaces the course name, pars, and stroke indexes for Round ${roundIdx} with the saved course. Existing scores are kept.`)) {
+      list.style.display = 'none';
+      return;
+    }
+    applyLibraryCourseToRound(roundIdx, lib);
+    list.style.display = 'none';
+    renderAll();
+  });
+  if (clearBtn) {
+    clearBtn.addEventListener('pointerdown', (e) => e.preventDefault()); // keep input from stealing blur before the clear registers
+  }
+}
+
 function courseCard(roundIdx, dis) {
   dis = dis || '';
   const c = courseFor(roundIdx);
@@ -2357,8 +2448,7 @@ function courseCard(roundIdx, dis) {
     `<option value="${id}" ${round.tournamentWinner === id ? 'selected' : ''}>${playerName(id)}</option>`).join('');
   const rotationOpts = is666 ? oneOneOneRotationOptions(c.holeCount || 18) : [];
   const currentRotation = (round.rotateEvery && rotationOpts.includes(round.rotateEvery)) ? round.rotateEvery : (rotationOpts[rotationOpts.length - 1] || 1);
-  const courseOpts = `<option value="">— Custom (not saved) —</option>` +
-    courseLibrary.map(lc => `<option value="${lc.id}" ${c.courseId === lc.id ? 'selected' : ''}>${escapeHtml(lc.name)}</option>`).join('');
+  const currentCourseName = c.courseId ? (findCourseInLibrary(c.courseId)?.name || c.name) : '';
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
@@ -2368,9 +2458,16 @@ function courseCard(roundIdx, dis) {
         <option value="back9" ${c.holeSet === 'back9' ? 'selected' : ''}>9 Holes (Back)</option>
       </select></div>
     </div>
-    <div class="field">
+    <div class="field course-combo-field">
       <label>Course</label>
-      <select class="cfgCourseSelect" data-round="${roundIdx}" ${dis}>${courseOpts}</select>
+      <div class="course-combo" data-round="${roundIdx}">
+        <input type="text" class="course-combo-input" data-round="${roundIdx}" data-course-id="${c.courseId || ''}"
+          value="${c.courseId ? escapeHtml(currentCourseName) : ''}"
+          placeholder="Search saved courses or leave blank for custom…" autocomplete="off" ${dis}>
+        <button type="button" class="course-combo-clear" data-round="${roundIdx}" style="display:${c.courseId ? 'flex' : 'none'};" ${dis} aria-label="Clear course selection">×</button>
+        <div class="course-combo-list" data-round="${roundIdx}" style="display:none;"></div>
+      </div>
+      <p class="helper-text" style="margin-top:6px;">${c.courseId ? 'Linked to a saved course.' : 'Type to search saved courses — leave blank to keep a one-off custom course.'}</p>
     </div>
     ${c.courseId ? '' : `<div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>`}
     ${dis ? '' : `<div class="field-row">
@@ -2682,32 +2779,17 @@ function renderGameSettings() {
   el.querySelectorAll('.cfgCourseName').forEach(inp => {
     inp.addEventListener('change', () => { courseFor(Number(inp.dataset.round)).name = inp.value; saveState(); refreshNonSettingsViews(); });
   });
-  el.querySelectorAll('.cfgCourseSelect').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const roundIdx = Number(sel.dataset.round);
+  el.querySelectorAll('.course-combo-input').forEach(inp => {
+    wireCourseCombo(inp);
+  });
+  el.querySelectorAll('.course-combo-clear').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const roundIdx = Number(btn.dataset.round);
       const course = courseFor(roundIdx);
-      const round = state.rounds[roundIdx - 1];
-      const newId = sel.value || null;
-      if (newId === course.courseId) return;
-      if (!newId) {
-        // Switched to "— Custom (not saved) —" — keep whatever pars/
-        // indexes are currently loaded, just detach from the library so
-        // they become freely editable again.
-        course.courseId = null;
-        saveState(); renderAll();
-        return;
-      }
-      const lib = findCourseInLibrary(newId);
-      if (!lib) return;
-      if (!confirm(`Load "${lib.name}"? This replaces the course name, pars, and stroke indexes for Round ${roundIdx} with the saved course. Existing scores are kept.`)) {
-        sel.value = course.courseId || ''; return;
-      }
-      course.courseId = newId;
-      course.name = lib.name;
-      course.holes = holesForSet(lib.holes, course.holeSet || '18');
-      const newCount = holeSetToCount(course.holeSet || '18');
-      resizeCourseHoles(course, newCount);
-      resizeRoundHoles(round, newCount);
+      if (!course.courseId) return;
+      // Detach from the library — keep whatever pars/indexes are
+      // currently loaded, just make them freely editable again.
+      course.courseId = null;
       saveState(); renderAll();
     });
   });
@@ -3419,15 +3501,7 @@ document.getElementById('saveCourseBtn').addEventListener('click', async () => {
     // Apply the saved course to the round that triggered the editor, using
     // whatever hole set (18/front9/back9) that round is currently set to.
     if (courseEditorRoundIdx) {
-      const course = courseFor(courseEditorRoundIdx);
-      const round = state.rounds[courseEditorRoundIdx - 1];
-      course.courseId = savedId;
-      course.name = name;
-      course.holes = holesForSet(holes, course.holeSet || '18');
-      const newCount = holeSetToCount(course.holeSet || '18');
-      resizeCourseHoles(course, newCount);
-      resizeRoundHoles(round, newCount);
-      saveState();
+      applyLibraryCourseToRound(courseEditorRoundIdx, { id: savedId, name, holes });
     }
     closeCourseEditor();
     renderAll();
