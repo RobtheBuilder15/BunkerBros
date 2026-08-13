@@ -1626,9 +1626,14 @@ async function requestPasswordReset(usernameOrEmail) {
   }
   const email = await resolveEmail(usernameOrEmail);
   if (!email) { showToast('No account found'); return; }
-  // Send them to a dedicated reset landing so the recovery hash always
-  // gets picked up on load — see submitNewPassword/initSupabaseAuth for
-  // the corresponding handling of the PASSWORD_RECOVERY event.
+  // IMPORTANT: this only produces a working link if the current origin is
+  // listed under Supabase → Authentication → URL Configuration →
+  // Redirect URLs. If it isn't allow-listed there, Supabase silently
+  // redirects to whatever Site URL is configured instead (often a stale
+  // localhost address from local dev) and the emailed link goes nowhere —
+  // no error is raised here or on Supabase's side, so this is a one-time
+  // dashboard setup step, not something this code can detect or recover
+  // from at request time.
   const redirectTo = window.location.origin + window.location.pathname;
   const { error: resetErr } = await auth.client.auth.resetPasswordForEmail(email, { redirectTo });
   if (resetErr) { showToast('Could not send reset email'); return; }
