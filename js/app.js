@@ -1462,12 +1462,21 @@ async function initSupabaseAuth() {
     return;
   }
   auth.client = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  const { data } = await auth.client.auth.getSession();
-  auth.session = data.session || null;
+
+  // If we've arrived here via a password-recovery link, Supabase will
+  // parse the token out of the URL hash itself (detectSessionInUrl is on
+  // by default) and fire a PASSWORD_RECOVERY auth event below — but that
+  // event only fires once, and only if a listener is already attached
+  // before the SDK finishes processing the URL on this initial load. We
+  // register onAuthStateChange BEFORE calling getSession()/awaiting
+  // anything else, so we never miss it.
   auth.client.auth.onAuthStateChange((event, session) => {
     auth.session = session;
     if (event === 'PASSWORD_RECOVERY') { pendingRecovery = true; renderAccountSection(); }
   });
+
+  const { data } = await auth.client.auth.getSession();
+  auth.session = data.session || null;
   if (auth.session) await afterLogin();
   auth.ready = true;
   renderAccountSection();
@@ -1551,13 +1560,31 @@ async function loadMyRooms() {
   });
 }
 
+// Builds a stable placeholder email for accounts created without a real
+// email address. Supabase Auth always requires *an* email internally, but
+// since the app authenticates by username (see resolveEmail/logIn), the
+// person never needs to know or use this address. It's derived from the
+// username so it stays unique per-account without hitting the network.
+function placeholderEmail(username) {
+  const slug = username.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'bro';
+  return `${slug}.${Date.now().toString(36)}@no-reply.bunkerbros.app`;
+}
+
 async function signUp(username, email, password) {
-  if (!username || !email || !password) { showToast('Fill in username, email, and password'); return; }
-  const { data, error } = await auth.client.auth.signUp({ email: email.trim(), password });
+  username = (username || '').trim();
+  email = (email || '').trim();
+  if (!username || !password) { showToast('Fill in a username and password'); return; }
+  // Email is optional — it's only used for account recovery. If the
+  // person skips it, sign up with a placeholder address behind the
+  // scenes so Supabase Auth (which always requires an email) still works;
+  // the person continues to log in with their username either way.
+  const hasRealEmail = !!email;
+  const authEmail = hasRealEmail ? email : placeholderEmail(username);
+  const { data, error } = await auth.client.auth.signUp({ email: authEmail, password });
   if (error) { showToast(/already registered/i.test(error.message) ? 'That email is already in use' : error.message); return; }
   auth.session = data.session || null;
   if (!auth.session) { showToast('Account created — try logging in'); renderAccountSection(); return; }
-  const { error: profileErr } = await auth.client.from('profiles').insert({ id: auth.session.user.id, username: username.trim(), email: email.trim() });
+  const { error: profileErr } = await auth.client.from('profiles').insert({ id: auth.session.user.id, username, email: hasRealEmail ? email : null });
   if (profileErr) { showToast(/duplicate|unique/i.test(profileErr.message) ? 'That username is taken' : 'Could not finish setting up your account'); return; }
   await afterLogin();
   renderAccountSection();
@@ -1587,9 +1614,23 @@ async function logIn(usernameOrEmail, password) {
 
 async function requestPasswordReset(usernameOrEmail) {
   if (!usernameOrEmail) { showToast('Enter your username or email first'); return; }
+  // resolveEmail returns the account's AUTH email — the real recovery
+  // email if one was given at signup, or an internal placeholder address
+  // if not (see placeholderEmail/signUp). A placeholder address has no
+  // real inbox, so a reset link sent there can never be retrieved —
+  // detect that case up front and say so, rather than claiming success.
+  const v = usernameOrEmail.trim();
+  if (!v.includes('@')) {
+    const { data: hasRealEmail } = await auth.client.rpc('username_has_recovery_email', { p_username: v });
+    if (hasRealEmail === false) { showToast('This account has no recovery email on file — ask an admin to help, or contact support'); return; }
+  }
   const email = await resolveEmail(usernameOrEmail);
   if (!email) { showToast('No account found'); return; }
-  const { error: resetErr } = await auth.client.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname });
+  // Send them to a dedicated reset landing so the recovery hash always
+  // gets picked up on load — see submitNewPassword/initSupabaseAuth for
+  // the corresponding handling of the PASSWORD_RECOVERY event.
+  const redirectTo = window.location.origin + window.location.pathname;
+  const { error: resetErr } = await auth.client.auth.resetPasswordForEmail(email, { redirectTo });
   if (resetErr) { showToast('Could not send reset email'); return; }
   showToast('Check your email for a reset link');
 }
@@ -2088,8 +2129,12 @@ function renderAccountSection() {
         <button data-mode="login" class="active">Log In</button>
         <button data-mode="signup">Sign Up</button>
       </div>
-      <div class="field"><label>Username or Email</label><input type="text" id="authUsernameInput" autocapitalize="none" autocomplete="username"></div>
-      <div class="field" id="authEmailField" style="display:none;"><label>Email</label><input type="email" id="authEmailInput" autocomplete="email"></div>
+      <div class="field"><label>Username</label><input type="text" id="authUsernameInput" autocapitalize="none" autocomplete="username"></div>
+      <div class="field" id="authEmailField" style="display:none;">
+        <label>Email (optional)</label>
+        <input type="email" id="authEmailInput" autocomplete="email">
+        <p class="helper-text" style="margin:6px 0 0;">Only used for account recovery — you'll still log in with your username.</p>
+      </div>
       <div class="field"><label>Password</label><input type="password" id="authPasswordInput" autocomplete="current-password"></div>
       <button class="btn btn-primary btn-block" id="authSubmitBtn">Log In</button>
       <button class="btn btn-ghost btn-block" id="forgotPasswordBtn" style="margin-top:10px;">Forgot password?</button>
