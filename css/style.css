@@ -360,6 +360,31 @@ table.breakdown-table tfoot td { font-weight: 800; background: var(--sand); bord
 .hole-par-input { text-align: center; }
 .hole-par-input label { text-align: center; font-family: var(--font-mono); }
 
+/* ---------- Course combo (searchable course picker) ---------- */
+.course-combo-field { position: relative; }
+.course-combo { position: relative; display: flex; align-items: center; }
+.course-combo-input { padding-right: 34px !important; }
+.course-combo-clear {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; border-radius: 50%; border: none; background: rgba(28,61,46,0.1);
+  color: var(--ink); font-size: 1rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 0;
+}
+.course-combo-clear:active { background: rgba(28,61,46,0.18); }
+.course-combo-list {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 5;
+  max-height: 220px; overflow-y: auto;
+  background: var(--white); border: 1.5px solid rgba(28,61,46,0.25); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lift);
+}
+.course-combo-item {
+  padding: 10px 12px; font-size: 0.86rem; font-weight: 600; color: var(--ink);
+  cursor: pointer; border-bottom: 1px solid rgba(28,61,46,0.08);
+}
+.course-combo-item:last-child { border-bottom: none; }
+.course-combo-item:active { background: var(--sand); }
+.course-combo-empty { padding: 10px 12px; font-size: 0.8rem; color: var(--ink-soft); font-style: italic; }
+
 button.btn { font-family: var(--font-body); font-weight: 700; font-size: 0.85rem; padding: 11px 16px; border-radius: 999px; border: none; cursor: pointer; }
 .btn-primary { background: var(--ink); color: var(--cream); }
 .btn-secondary { background: var(--sand); color: var(--ink); }
