@@ -161,13 +161,13 @@ function defaultRounds() {
   return [
     { id: 1, type: 'matchplay3', label: 'Round 1', gameName: 'Match Play',
       holes: makeHoles(), ctpWinner: null, ldWinner: null, date: null,
-      excludeFromLifetime: false, tournamentWinner: null },
+      excludeFromLifetime: false, excludeFromStats: false, tournamentWinner: null },
     { id: 2, type: 'wolf', label: 'Round 2', gameName: 'Wolf',
       holes: makeHoles(() => ({ wolf: { partner: 'lone' } })), ctpWinner: null, ldWinner: null,
-      wolfOrder: ['p1', 'p2', 'p3'], date: null, excludeFromLifetime: false, tournamentWinner: null },
+      wolfOrder: ['p1', 'p2', 'p3'], date: null, excludeFromLifetime: false, excludeFromStats: false, tournamentWinner: null },
     { id: 3, type: '111', label: 'Round 3', gameName: '6-6-6',
       holes: makeHoles(), ctpWinner: null, ldWinner: null, oneOneOneOrder: ['p1', 'p2', 'p3'], rotateEvery: 6,
-      date: null, excludeFromLifetime: false, tournamentWinner: null }
+      date: null, excludeFromLifetime: false, excludeFromStats: false, tournamentWinner: null }
   ];
 }
 
@@ -176,9 +176,9 @@ function emptyRoomState() {
 }
 
 // Ensures older cached/remote rounds have the newer fields this version
-// introduced (date, excludeFromLifetime, tournamentWinner, oneOneOneOrder,
-// wolfOrder, and "No Game" support), so nothing crashes reading
-// pre-upgrade data. Takes the player-id list explicitly rather than
+// introduced (date, excludeFromLifetime, excludeFromStats, tournamentWinner,
+// oneOneOneOrder, wolfOrder, and "No Game" support), so nothing crashes
+// reading pre-upgrade data. Takes the player-id list explicitly rather than
 // reading global state, since this runs during room-load before `state`
 // necessarily reflects the data being migrated (see applyRemoteRoomRow,
 // which migrates an incoming row before assigning it into state/liveRoomState).
@@ -188,6 +188,7 @@ function migrateRoundsForIds(rounds, ids) {
   rounds.forEach(r => {
     if (r.date === undefined) r.date = null;
     if (r.excludeFromLifetime === undefined) r.excludeFromLifetime = false;
+    if (r.excludeFromStats === undefined) r.excludeFromStats = false;
     if (r.tournamentWinner === undefined) r.tournamentWinner = null;
     if (r.type === '111' && (!r.oneOneOneOrder || r.oneOneOneOrder.length !== n)) r.oneOneOneOrder = ids;
     if (r.type === '111' && r.rotateEvery == null) r.rotateEvery = 6;
@@ -722,7 +723,11 @@ function computeStats(computed, rounds) {
   });
 
   rounds.forEach((round, ri) => {
-    if (round.excludeFromLifetime) return;
+    // A round can count toward the leaderboard/lifetime score (via
+    // excludeFromLifetime) independently of whether its box-score-style
+    // stats show up on the Stats tab (via excludeFromStats) — either flag
+    // keeps it out of the per-player breakdowns computed here.
+    if (round.excludeFromLifetime || round.excludeFromStats) return;
     const rc = computed.rounds[ri];
     // "Best round score" and "most Stableford in a round" only make sense
     // comparing like-for-like — a 9-hole round can't fairly beat/lose to an
@@ -798,7 +803,7 @@ function computeStats(computed, rounds) {
   });
 
   rounds.forEach((round, ri) => {
-    if (round.excludeFromLifetime) return;
+    if (round.excludeFromLifetime || round.excludeFromStats) return;
     const rc = computed.rounds[ri];
     const maxAward = Math.max(...ids.map(id => rc.dailyAwards[id] || 0));
     if (maxAward > 0) ids.forEach(id => { if ((rc.dailyAwards[id] || 0) === maxAward) stats[id].dailyWins++; });
@@ -806,7 +811,9 @@ function computeStats(computed, rounds) {
 
   // Season-level tournament win/runner-up: prefer an admin-set winner if
   // present, else fall back to computed weekend ranking once all rounds
-  // (that aren't excluded) are finalized.
+  // (that aren't excluded) are finalized. This is based on the leaderboard
+  // total, not the Stats-tab breakdowns, so it deliberately ignores
+  // excludeFromStats and only respects excludeFromLifetime.
   const relevantRounds = rounds.map((r, i) => ({ r, rc: computed.rounds[i] }));
   const allDone = relevantRounds.every(x => x.r.excludeFromLifetime || x.rc.finalized);
   if (allDone) {
@@ -958,6 +965,200 @@ function renderLeaderboard() {
 }
 
 /* ---------------------------------------------------------------
+   SEASON NAVIGATION — Previous / Next season (helpers used by both the
+   Home season-nav widget and the compact arrow badges on Scorecard/Stats)
+---------------------------------------------------------------- */
+let liveRoomState = null;
+let viewingSeasonKey = null;
+
+function isViewingLive() { return viewingSeasonKey === null; }
+function sortedArchivedSeasons() {
+  return (liveRoomState || state).archivedSeasons.slice().sort((a, b) => {
+    const na = parseInt(a.year, 10), nb = parseInt(b.year, 10);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return (a.archivedAt || 0) - (b.archivedAt || 0);
+  });
+}
+function enterSeason(season) {
+  state = { config: season.config, rounds: season.rounds, archivedSeasons: [], year: season.year, unlocked: false };
+  viewingSeasonKey = season.archivedAt;
+}
+
+function navigateSeason(dir) {
+  const seasons = sortedArchivedSeasons();
+  if (isViewingLive()) {
+    if (dir < 0 && seasons.length) {
+      liveRoomState = state;
+      enterSeason(seasons[seasons.length - 1]);
+    }
+    renderAll();
+    return;
+  }
+  const idx = seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
+  if (idx === -1) {
+    state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
+    renderAll();
+    return;
+  }
+  if (dir < 0) {
+    if (idx > 0) enterSeason(seasons[idx - 1]);
+  } else if (idx < seasons.length - 1) {
+    enterSeason(seasons[idx + 1]);
+  } else {
+    state = liveRoomState; liveRoomState = null; viewingSeasonKey = null;
+  }
+  renderAll();
+}
+
+// Whether there's a previous/next season to move to from wherever we're
+// currently viewing — shared by the Home season-nav widget and the
+// compact arrow controls on Scorecard/Stats, so all three always agree on
+// when the arrows should be enabled.
+function canNavigateSeason(dir) {
+  const seasons = sortedArchivedSeasons();
+  if (isViewingLive()) return dir < 0 && seasons.length > 0;
+  if (dir > 0) return true; // next always at least returns to live
+  const idx = seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
+  return idx > 0;
+}
+
+// Compact ‹ label › markup for the small year-indicator badges on
+// Scorecard and Stats — visually distinct from the full season-nav widget
+// on Home, but drives the exact same navigateSeason()/viewingSeasonKey
+// global position, so moving seasons from any of the three tabs moves all
+// of them together.
+function seasonArrowHtml(label) {
+  return `<button type="button" class="season-arrow-btn" data-dir="-1" aria-label="Previous season" ${canNavigateSeason(-1) ? '' : 'disabled'}>‹</button>` +
+    `<span class="season-arrow-label">${escapeHtml(label)}</span>` +
+    `<button type="button" class="season-arrow-btn" data-dir="1" aria-label="Next season" ${canNavigateSeason(1) ? '' : 'disabled'}>›</button>`;
+}
+function wireSeasonArrowHtml(el) {
+  el.querySelectorAll('.season-arrow-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigateSeason(Number(btn.dataset.dir));
+    });
+  });
+}
+
+function blankRoundsPreservingSettings() {
+  return state.rounds.map((r, i) => {
+    const holeCount = courseFor(i + 1).holeCount || 18;
+    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null,
+      date: null, excludeFromLifetime: false, excludeFromStats: false, tournamentWinner: null };
+    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === playerIds().length) ? r.wolfOrder.slice() : playerIds();
+    if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === playerIds().length) ? r.oneOneOneOrder.slice() : playerIds();
+    if (r.type === '111') fresh.rotateEvery = r.rotateEvery || 6;
+    for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
+    return fresh;
+  });
+}
+
+// Admin-only: rename whichever season is currently in view — the live
+// season (state.year directly) or an archived one (found via its stable
+// archivedAt key, since archived seasons live in liveRoomState while a
+// past season is being browsed). Blocks renaming to a name already used
+// by another season in this room, live or archived, since navigation and
+// backfill both key off uniqueness of the name.
+function renameCurrentSeason(newName) {
+  if (!newName) { showToast('Enter a season name'); return; }
+  const root = liveRoomState || state;
+  const liveNameTaken = !isViewingLive() && String(root.year) === newName;
+  const archivedNameTaken = root.archivedSeasons.some(s =>
+    String(s.year) === newName && !(!isViewingLive() && s.archivedAt === viewingSeasonKey)
+  );
+  if (liveNameTaken || archivedNameTaken) { showToast('That name is already used by another season'); return; }
+
+  if (isViewingLive()) {
+    state.year = newName;
+  } else {
+    const season = root.archivedSeasons.find(s => s.archivedAt === viewingSeasonKey);
+    if (!season) return;
+    season.year = newName;
+    state.year = newName;
+  }
+  saveState();
+  renderAll();
+  showToast('Season renamed');
+}
+
+async function archiveAndStartNewYear(newYearLabel) {
+  state.archivedSeasons.push({ year: state.year, config: JSON.parse(JSON.stringify(state.config)), rounds: JSON.parse(JSON.stringify(state.rounds)), archivedAt: Date.now() });
+  const oldYear = state.year;
+  state.year = newYearLabel;
+  state.rounds = blankRoundsPreservingSettings();
+  saveState();
+  renderAll();
+  showToast(`Archived ${oldYear} — welcome to ${newYearLabel}!`);
+}
+
+function addBacklogYear(label) {
+  if (state.archivedSeasons.some(s => String(s.year) === String(label))) { showToast('A season with that name already exists'); return; }
+  const fresh = emptyRoomState();
+  fresh.config.players = JSON.parse(JSON.stringify(state.config.players));
+  state.archivedSeasons.push({ year: label, config: fresh.config, rounds: fresh.rounds, archivedAt: Date.now() });
+  saveState();
+  renderAll();
+  showToast(`Added ${label} — use the ‹ › arrows on Home to open and fill it in`);
+}
+
+// Admin-only: permanently delete an archived (non-live) season. The live
+// year can never be deleted this way — only past, already-archived years.
+function deleteArchivedYear(archivedAt) {
+  const idx = state.archivedSeasons.findIndex(s => s.archivedAt === archivedAt);
+  if (idx === -1) return;
+  const label = state.archivedSeasons[idx].year;
+  state.archivedSeasons.splice(idx, 1);
+  if (!isViewingLive() && viewingSeasonKey === archivedAt) {
+    state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
+  }
+  saveState();
+  renderAll();
+  showToast(`Deleted ${label}`);
+}
+
+function renderSeasonNav() {
+  const el = document.getElementById('seasonHistoryWidget');
+  if (!el) return;
+  if (!appReady()) { el.innerHTML = ''; return; }
+  const seasons = sortedArchivedSeasons();
+  if (!seasons.length) { el.innerHTML = ''; return; }
+  const label = isViewingLive() ? `${state.year} (Live)` : state.year;
+  const idx = isViewingLive() ? -1 : seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
+  const canPrev = isViewingLive() ? seasons.length > 0 : idx > 0;
+  const canNext = !isViewingLive();
+  const showDelete = !isViewingLive() && isAdmin();
+  el.innerHTML = `<div class="season-nav">
+    <button class="round-nav-btn" id="seasonPrevBtn" ${canPrev ? '' : 'disabled'} aria-label="Previous season">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <span class="season-nav-label">${escapeHtml(label)}${!isViewingLive() ? (isAdmin() ? ' <small>editing</small>' : ' <small>read-only</small>') : ''}</span>
+    <button class="round-nav-btn" id="seasonNextBtn" ${canNext ? '' : 'disabled'} aria-label="Next season">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+    ${showDelete ? `<button class="round-nav-btn" id="seasonDeleteBtn" aria-label="Delete this season" style="color:var(--rust);">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z"/></svg>
+    </button>` : ''}
+  </div>`;
+  const prevBtn = document.getElementById('seasonPrevBtn');
+  const nextBtn = document.getElementById('seasonNextBtn');
+  const delBtn = document.getElementById('seasonDeleteBtn');
+  if (prevBtn) prevBtn.addEventListener('click', () => navigateSeason(-1));
+  if (nextBtn) nextBtn.addEventListener('click', () => navigateSeason(1));
+  if (delBtn) delBtn.addEventListener('click', () => {
+    const typed = prompt(`This permanently deletes all "${state.year}" data. Type the season name to confirm:`);
+    if (typed !== String(state.year)) { if (typed !== null) showToast('Did not match — not deleted'); return; }
+    const key = viewingSeasonKey;
+    deleteArchivedYear(key);
+  });
+}
+
+function setSyncDot(cls) {
+  const el = document.getElementById('syncDot');
+  if (el) el.className = 'sync-dot' + (cls ? (' ' + cls) : '');
+}
+
+/* ---------------------------------------------------------------
    RENDERING — SCORECARD (row-assembly helper: Out after hole 9)
 ---------------------------------------------------------------- */
 let activeRoundTab = 1;
@@ -1017,9 +1218,11 @@ function renderRoundsView() {
   renderRoundTabs();
   if (!appReady()) { document.getElementById('roundContent').innerHTML = readyGateHtml(); return; }
 
-  // Year indicator, top-right, across from the "Scorecard" heading — only
-  // meaningful once there's more than one year to distinguish between
-  // (i.e. at least one archived season exists alongside the live year).
+  // Year indicator + season nav arrows, top-right, across from the
+  // "Scorecard" heading — the arrows share the SAME global season
+  // position as Home (viewingSeasonKey / navigateSeason), so moving to a
+  // different season from here also moves Home and Stats. Only shown once
+  // there's more than one season to navigate between.
   const sectionTitle = document.querySelector('#view-rounds .section-title');
   if (sectionTitle) {
     let yearBadge = sectionTitle.querySelector('.year-indicator');
@@ -1030,7 +1233,8 @@ function renderRoundsView() {
         yearBadge.className = 'year-indicator';
         sectionTitle.appendChild(yearBadge);
       }
-      yearBadge.textContent = `${state.year}` + (isViewingLive() ? '' : ' (archived)');
+      yearBadge.innerHTML = seasonArrowHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      wireSeasonArrowHtml(yearBadge);
     } else if (yearBadge) {
       yearBadge.remove();
     }
@@ -1381,6 +1585,29 @@ let statsMode = 'lifetime';
 
 function renderStats() {
   if (!appReady()) { document.getElementById('statsList').innerHTML = readyGateHtml(); return; }
+
+  // Year indicator + season nav arrows, top-right, across from the
+  // "Weekend Stats" heading — same global season position as Home and
+  // Scorecard (viewingSeasonKey / navigateSeason). Only meaningful in
+  // "weekend" stats mode (lifetime stats are always across every season by
+  // definition) and only once there's more than one season to move between.
+  const sectionTitle = document.querySelector('#view-stats .section-title');
+  if (sectionTitle) {
+    let yearBadge = sectionTitle.querySelector('.year-indicator');
+    const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
+    if (appReady() && hasMultipleYears && statsMode === 'weekend') {
+      if (!yearBadge) {
+        yearBadge = document.createElement('span');
+        yearBadge.className = 'year-indicator';
+        sectionTitle.appendChild(yearBadge);
+      }
+      yearBadge.innerHTML = seasonArrowHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      wireSeasonArrowHtml(yearBadge);
+    } else if (yearBadge) {
+      yearBadge.remove();
+    }
+  }
+
   const stats = statsMode === 'lifetime' ? computeLifetimeStats() : computeStats(computeAll(), state.rounds);
   let ids = playerIds();
   const loggedInId = myPlayerId();
@@ -1942,168 +2169,6 @@ async function loadAndRenderMembers() {
 }
 
 /* ---------------------------------------------------------------
-   SEASON NAVIGATION — Previous / Next season
----------------------------------------------------------------- */
-let liveRoomState = null;
-let viewingSeasonKey = null;
-
-function isViewingLive() { return viewingSeasonKey === null; }
-function sortedArchivedSeasons() {
-  return (liveRoomState || state).archivedSeasons.slice().sort((a, b) => {
-    const na = parseInt(a.year, 10), nb = parseInt(b.year, 10);
-    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
-    return (a.archivedAt || 0) - (b.archivedAt || 0);
-  });
-}
-function enterSeason(season) {
-  state = { config: season.config, rounds: season.rounds, archivedSeasons: [], year: season.year, unlocked: false };
-  viewingSeasonKey = season.archivedAt;
-}
-
-function navigateSeason(dir) {
-  const seasons = sortedArchivedSeasons();
-  if (isViewingLive()) {
-    if (dir < 0 && seasons.length) {
-      liveRoomState = state;
-      enterSeason(seasons[seasons.length - 1]);
-    }
-    renderAll();
-    return;
-  }
-  const idx = seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
-  if (idx === -1) {
-    state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
-    renderAll();
-    return;
-  }
-  if (dir < 0) {
-    if (idx > 0) enterSeason(seasons[idx - 1]);
-  } else if (idx < seasons.length - 1) {
-    enterSeason(seasons[idx + 1]);
-  } else {
-    state = liveRoomState; liveRoomState = null; viewingSeasonKey = null;
-  }
-  renderAll();
-}
-
-function blankRoundsPreservingSettings() {
-  return state.rounds.map((r, i) => {
-    const holeCount = courseFor(i + 1).holeCount || 18;
-    const fresh = { id: r.id, type: r.type, label: r.label, gameName: r.gameName, holes: {}, ctpWinner: null, ldWinner: null,
-      date: null, excludeFromLifetime: false, tournamentWinner: null };
-    if (r.type === 'wolf') fresh.wolfOrder = (r.wolfOrder && r.wolfOrder.length === playerIds().length) ? r.wolfOrder.slice() : playerIds();
-    if (r.type === '111') fresh.oneOneOneOrder = (r.oneOneOneOrder && r.oneOneOneOrder.length === playerIds().length) ? r.oneOneOneOrder.slice() : playerIds();
-    if (r.type === '111') fresh.rotateEvery = r.rotateEvery || 6;
-    for (let n = 1; n <= holeCount; n++) fresh.holes[n] = buildEmptyHole(fresh);
-    return fresh;
-  });
-}
-
-// Admin-only: rename whichever season is currently in view — the live
-// season (state.year directly) or an archived one (found via its stable
-// archivedAt key, since archived seasons live in liveRoomState while a
-// past season is being browsed). Blocks renaming to a name already used
-// by another season in this room, live or archived, since navigation and
-// backfill both key off uniqueness of the name.
-function renameCurrentSeason(newName) {
-  if (!newName) { showToast('Enter a season name'); return; }
-  const root = liveRoomState || state;
-  const liveNameTaken = !isViewingLive() && String(root.year) === newName;
-  const archivedNameTaken = root.archivedSeasons.some(s =>
-    String(s.year) === newName && !(!isViewingLive() && s.archivedAt === viewingSeasonKey)
-  );
-  if (liveNameTaken || archivedNameTaken) { showToast('That name is already used by another season'); return; }
-
-  if (isViewingLive()) {
-    state.year = newName;
-  } else {
-    const season = root.archivedSeasons.find(s => s.archivedAt === viewingSeasonKey);
-    if (!season) return;
-    season.year = newName;
-    state.year = newName;
-  }
-  saveState();
-  renderAll();
-  showToast('Season renamed');
-}
-
-async function archiveAndStartNewYear(newYearLabel) {
-  state.archivedSeasons.push({ year: state.year, config: JSON.parse(JSON.stringify(state.config)), rounds: JSON.parse(JSON.stringify(state.rounds)), archivedAt: Date.now() });
-  const oldYear = state.year;
-  state.year = newYearLabel;
-  state.rounds = blankRoundsPreservingSettings();
-  saveState();
-  renderAll();
-  showToast(`Archived ${oldYear} — welcome to ${newYearLabel}!`);
-}
-
-function addBacklogYear(label) {
-  if (state.archivedSeasons.some(s => String(s.year) === String(label))) { showToast('A season with that name already exists'); return; }
-  const fresh = emptyRoomState();
-  fresh.config.players = JSON.parse(JSON.stringify(state.config.players));
-  state.archivedSeasons.push({ year: label, config: fresh.config, rounds: fresh.rounds, archivedAt: Date.now() });
-  saveState();
-  renderAll();
-  showToast(`Added ${label} — use the ‹ › arrows on Home to open and fill it in`);
-}
-
-// Admin-only: permanently delete an archived (non-live) season. The live
-// year can never be deleted this way — only past, already-archived years.
-function deleteArchivedYear(archivedAt) {
-  const idx = state.archivedSeasons.findIndex(s => s.archivedAt === archivedAt);
-  if (idx === -1) return;
-  const label = state.archivedSeasons[idx].year;
-  state.archivedSeasons.splice(idx, 1);
-  if (!isViewingLive() && viewingSeasonKey === archivedAt) {
-    state = liveRoomState || state; liveRoomState = null; viewingSeasonKey = null;
-  }
-  saveState();
-  renderAll();
-  showToast(`Deleted ${label}`);
-}
-
-function renderSeasonNav() {
-  const el = document.getElementById('seasonHistoryWidget');
-  if (!el) return;
-  if (!appReady()) { el.innerHTML = ''; return; }
-  const seasons = sortedArchivedSeasons();
-  if (!seasons.length) { el.innerHTML = ''; return; }
-  const label = isViewingLive() ? `${state.year} (Live)` : state.year;
-  const idx = isViewingLive() ? -1 : seasons.findIndex(s => s.archivedAt === viewingSeasonKey);
-  const canPrev = isViewingLive() ? seasons.length > 0 : idx > 0;
-  const canNext = !isViewingLive();
-  const showDelete = !isViewingLive() && isAdmin();
-  el.innerHTML = `<div class="season-nav">
-    <button class="round-nav-btn" id="seasonPrevBtn" ${canPrev ? '' : 'disabled'} aria-label="Previous season">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
-    </button>
-    <span class="season-nav-label">${escapeHtml(label)}${!isViewingLive() ? (isAdmin() ? ' <small>editing</small>' : ' <small>read-only</small>') : ''}</span>
-    <button class="round-nav-btn" id="seasonNextBtn" ${canNext ? '' : 'disabled'} aria-label="Next season">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-    </button>
-    ${showDelete ? `<button class="round-nav-btn" id="seasonDeleteBtn" aria-label="Delete this season" style="color:var(--rust);">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z"/></svg>
-    </button>` : ''}
-  </div>`;
-  const prevBtn = document.getElementById('seasonPrevBtn');
-  const nextBtn = document.getElementById('seasonNextBtn');
-  const delBtn = document.getElementById('seasonDeleteBtn');
-  if (prevBtn) prevBtn.addEventListener('click', () => navigateSeason(-1));
-  if (nextBtn) nextBtn.addEventListener('click', () => navigateSeason(1));
-  if (delBtn) delBtn.addEventListener('click', () => {
-    const typed = prompt(`This permanently deletes all "${state.year}" data. Type the season name to confirm:`);
-    if (typed !== String(state.year)) { if (typed !== null) showToast('Did not match — not deleted'); return; }
-    const key = viewingSeasonKey;
-    deleteArchivedYear(key);
-  });
-}
-
-function setSyncDot(cls) {
-  const el = document.getElementById('syncDot');
-  if (el) el.className = 'sync-dot' + (cls ? (' ' + cls) : '');
-}
-
-/* ---------------------------------------------------------------
    RENDERING — ACCOUNT & ROOMS
 ---------------------------------------------------------------- */
 function renderAccountSection() {
@@ -2544,7 +2609,12 @@ function courseCard(roundIdx, dis) {
     <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0;">
       <input type="checkbox" class="cfgExcludeLifetime" data-round="${roundIdx}" ${round.excludeFromLifetime ? 'checked' : ''} style="width:auto;" ${dis}>
       <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Exclude this round from lifetime stats</label>
-    </div>`}
+    </div>
+    <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0; margin-top:10px;">
+      <input type="checkbox" class="cfgExcludeStats" data-round="${roundIdx}" ${round.excludeFromStats ? 'checked' : ''} style="width:auto;" ${dis}>
+      <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Ignore this round's stats (birdies, Wolf/6-6-6/Skins records, etc.)</label>
+    </div>
+    <p class="helper-text" style="margin-top:6px;">The round's points still count toward the leaderboard and lifetime score — this only leaves it out of the Stats tab breakdowns (birdies/pars, Wolf/6-6-6/Skins records, CTP &amp; Longest Drive wins, best round, daily wins).</p>`}
     <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.${c.courseId ? ' Linked to a shared course — use "✏️ Edit This Course" above to change these.' : ''}</p>
     <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
     <div class="hole-grid">${c.holes.map((h, i) => `
@@ -2623,7 +2693,7 @@ function addRound() {
   const idx = state.rounds.length + 1;
   state.config.courses.push(defaultCourse(`Round ${idx} Course`, 8, 13, 18));
   const newRound = { id: idx, type: 'matchplay3', label: `Round ${idx}`, gameName: GAME_TYPE_LABELS['matchplay3'], holes: {}, ctpWinner: null, ldWinner: null,
-    date: null, excludeFromLifetime: false, tournamentWinner: null };
+    date: null, excludeFromLifetime: false, excludeFromStats: false, tournamentWinner: null };
   for (let n = 1; n <= 18; n++) newRound.holes[n] = buildEmptyHole(newRound);
   state.rounds.push(newRound);
   saveState(); renderAll();
@@ -2878,6 +2948,12 @@ function renderGameSettings() {
   el.querySelectorAll('.cfgExcludeLifetime').forEach(inp => {
     inp.addEventListener('change', () => {
       state.rounds[Number(inp.dataset.round) - 1].excludeFromLifetime = inp.checked;
+      saveState(); renderAll();
+    });
+  });
+  el.querySelectorAll('.cfgExcludeStats').forEach(inp => {
+    inp.addEventListener('change', () => {
+      state.rounds[Number(inp.dataset.round) - 1].excludeFromStats = inp.checked;
       saveState(); renderAll();
     });
   });
