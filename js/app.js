@@ -1022,18 +1022,25 @@ function canNavigateSeason(dir) {
   return idx > 0;
 }
 
-// Compact ‹ label › markup for the small year-indicator badges on
-// Scorecard and Stats — visually distinct from the full season-nav widget
-// on Home, but drives the exact same navigateSeason()/viewingSeasonKey
-// global position, so moving seasons from any of the three tabs moves all
-// of them together.
-function seasonArrowHtml(label) {
-  return `<button type="button" class="season-arrow-btn" data-dir="-1" aria-label="Previous season" ${canNavigateSeason(-1) ? '' : 'disabled'}>‹</button>` +
-    `<span class="season-arrow-label">${escapeHtml(label)}</span>` +
-    `<button type="button" class="season-arrow-btn" data-dir="1" aria-label="Next season" ${canNavigateSeason(1) ? '' : 'disabled'}>›</button>`;
+// Compact prev-button / label-pill / next-button trio for the Scorecard
+// and Stats section-title rows — same round icon-button treatment as the
+// Home season-nav widget's .round-nav-btn arrows (just smaller, to fit
+// inline next to a heading), and driving the exact same
+// navigateSeason()/viewingSeasonKey global position, so moving seasons
+// from any of the three tabs moves all of them together.
+function seasonArrowNavHtml(label) {
+  return `<div class="year-nav">
+    <button type="button" class="year-nav-btn" data-dir="-1" aria-label="Previous season" ${canNavigateSeason(-1) ? '' : 'disabled'}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <span class="year-indicator">${escapeHtml(label)}</span>
+    <button type="button" class="year-nav-btn" data-dir="1" aria-label="Next season" ${canNavigateSeason(1) ? '' : 'disabled'}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+  </div>`;
 }
-function wireSeasonArrowHtml(el) {
-  el.querySelectorAll('.season-arrow-btn').forEach(btn => {
+function wireSeasonArrowNavHtml(el) {
+  el.querySelectorAll('.year-nav-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       navigateSeason(Number(btn.dataset.dir));
@@ -1218,25 +1225,28 @@ function renderRoundsView() {
   renderRoundTabs();
   if (!appReady()) { document.getElementById('roundContent').innerHTML = readyGateHtml(); return; }
 
-  // Year indicator + season nav arrows, top-right, across from the
-  // "Scorecard" heading — the arrows share the SAME global season
-  // position as Home (viewingSeasonKey / navigateSeason), so moving to a
-  // different season from here also moves Home and Stats. Only shown once
-  // there's more than one season to navigate between.
+  // Season prev/next buttons + year label, top-right, across from the
+  // "Scorecard" heading — dedicated round icon-buttons (same style as
+  // Home's season-nav arrows), sharing the SAME global season position as
+  // Home (viewingSeasonKey / navigateSeason), so moving to a different
+  // season from here also moves Home and Stats. Only shown once there's
+  // more than one season to navigate between.
   const sectionTitle = document.querySelector('#view-rounds .section-title');
   if (sectionTitle) {
-    let yearBadge = sectionTitle.querySelector('.year-indicator');
+    let yearNav = sectionTitle.querySelector('.year-nav');
     const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
     if (appReady() && hasMultipleYears) {
-      if (!yearBadge) {
-        yearBadge = document.createElement('span');
-        yearBadge.className = 'year-indicator';
-        sectionTitle.appendChild(yearBadge);
+      const html = seasonArrowNavHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      if (!yearNav) {
+        sectionTitle.insertAdjacentHTML('beforeend', html);
+        yearNav = sectionTitle.querySelector('.year-nav');
+      } else {
+        yearNav.outerHTML = html;
+        yearNav = sectionTitle.querySelector('.year-nav');
       }
-      yearBadge.innerHTML = seasonArrowHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
-      wireSeasonArrowHtml(yearBadge);
-    } else if (yearBadge) {
-      yearBadge.remove();
+      wireSeasonArrowNavHtml(sectionTitle);
+    } else if (yearNav) {
+      yearNav.remove();
     }
   }
 
@@ -1586,25 +1596,28 @@ let statsMode = 'lifetime';
 function renderStats() {
   if (!appReady()) { document.getElementById('statsList').innerHTML = readyGateHtml(); return; }
 
-  // Year indicator + season nav arrows, top-right, across from the
-  // "Weekend Stats" heading — same global season position as Home and
-  // Scorecard (viewingSeasonKey / navigateSeason). Only meaningful in
-  // "weekend" stats mode (lifetime stats are always across every season by
-  // definition) and only once there's more than one season to move between.
+  // Season prev/next buttons + year label, top-right, across from the
+  // "Weekend Stats" heading — same dedicated round icon-buttons as
+  // Scorecard/Home, driving the same global season position (viewingSeasonKey
+  // / navigateSeason). Only meaningful in "weekend" stats mode (lifetime
+  // stats are always across every season by definition) and only once
+  // there's more than one season to move between.
   const sectionTitle = document.querySelector('#view-stats .section-title');
   if (sectionTitle) {
-    let yearBadge = sectionTitle.querySelector('.year-indicator');
+    let yearNav = sectionTitle.querySelector('.year-nav');
     const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
     if (appReady() && hasMultipleYears && statsMode === 'weekend') {
-      if (!yearBadge) {
-        yearBadge = document.createElement('span');
-        yearBadge.className = 'year-indicator';
-        sectionTitle.appendChild(yearBadge);
+      const html = seasonArrowNavHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      if (!yearNav) {
+        sectionTitle.insertAdjacentHTML('beforeend', html);
+        yearNav = sectionTitle.querySelector('.year-nav');
+      } else {
+        yearNav.outerHTML = html;
+        yearNav = sectionTitle.querySelector('.year-nav');
       }
-      yearBadge.innerHTML = seasonArrowHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
-      wireSeasonArrowHtml(yearBadge);
-    } else if (yearBadge) {
-      yearBadge.remove();
+      wireSeasonArrowNavHtml(sectionTitle);
+    } else if (yearNav) {
+      yearNav.remove();
     }
   }
 
