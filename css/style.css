@@ -151,7 +151,10 @@ body {
 .eyebrow { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sand-line); margin: 0 0 2px; }
 
 /* Year indicator badge, shown top-right of a section-title (e.g. across
-   from "Scorecard" on the Scorecard tab) */
+   from "Scorecard" or "Weekend Stats" on those tabs). When it contains
+   season-nav arrows (.season-arrow-btn), it switches to a flex row so the
+   ‹ label › controls line up; when it's just plain text (no arrows), the
+   original compact pill styling still applies untouched. */
 .year-indicator {
   font-family: var(--font-body);
   font-size: 0.66rem;
@@ -163,6 +166,37 @@ body {
   border: 1.5px solid rgba(28,61,46,0.18);
   border-radius: 999px;
   padding: 4px 10px;
+}
+.year-indicator:has(.season-arrow-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 8px;
+}
+.season-arrow-btn {
+  background: none;
+  border: none;
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1;
+  font-weight: 800;
+  padding: 4px 5px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+.season-arrow-btn:disabled { opacity: 0.3; }
+.season-arrow-btn:not(:disabled):active { background: rgba(28,61,46,0.12); }
+.season-arrow-label {
+  font-family: var(--font-body);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink);
+  white-space: nowrap;
 }
 
 .sand-divider {
