@@ -151,10 +151,8 @@ body {
 .eyebrow { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sand-line); margin: 0 0 2px; }
 
 /* Year indicator badge, shown top-right of a section-title (e.g. across
-   from "Scorecard" or "Weekend Stats" on those tabs). When it contains
-   season-nav arrows (.season-arrow-btn), it switches to a flex row so the
-   ‹ label › controls line up; when it's just plain text (no arrows), the
-   original compact pill styling still applies untouched. */
+   from "Scorecard" or "Weekend Stats" on those tabs). Plain-text-only use
+   (no season nav available) keeps this exact compact pill styling. */
 .year-indicator {
   font-family: var(--font-body);
   font-size: 0.66rem;
@@ -166,38 +164,30 @@ body {
   border: 1.5px solid rgba(28,61,46,0.18);
   border-radius: 999px;
   padding: 4px 10px;
+  white-space: nowrap;
 }
-.year-indicator:has(.season-arrow-btn) {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px 4px 2px 8px;
-}
-.season-arrow-btn {
-  background: none;
+
+/* Season prev/next nav — dedicated round icon-buttons flanking the year
+   pill, top-right of the Scorecard/Stats section-title rows. Same visual
+   language as Home's .round-nav-btn season-nav arrows, just sized down to
+   sit inline next to a heading instead of centered in its own row. */
+.year-nav { display: inline-flex; align-items: center; gap: 6px; }
+.year-nav-btn {
+  background: var(--sand);
   border: none;
-  color: var(--ink);
-  font-size: 0.85rem;
-  line-height: 1;
-  font-weight: 800;
-  padding: 4px 5px;
-  border-radius: 999px;
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--ink);
   touch-action: manipulation;
 }
-.season-arrow-btn:disabled { opacity: 0.3; }
-.season-arrow-btn:not(:disabled):active { background: rgba(28,61,46,0.12); }
-.season-arrow-label {
-  font-family: var(--font-body);
-  font-size: 0.66rem;
-  font-weight: 800;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: var(--ink);
-  white-space: nowrap;
-}
+.year-nav-btn svg { width: 14px; height: 14px; }
+.year-nav-btn:disabled { opacity: 0.3; }
+.year-nav-btn:not(:disabled):active { background: rgba(28,61,46,0.18); }
 
 .sand-divider {
   height: 10px; border-radius: 999px;
