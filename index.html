@@ -187,8 +187,15 @@
     <div id="courseEditorBody">
       <div class="field"><label>Course Name</label><input type="text" id="courseEditorName" placeholder="e.g. Pinehurst No. 2"></div>
       <p class="helper-text" id="courseEditorScopeText" style="margin:0 0 10px;">Courses are shared across every room — everyone will see this course in their picker.</p>
-      <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index (18 Holes)</p>
-      <p class="helper-text" style="margin-top:-4px;">Top box = par, bottom box = stroke index. This always stores a full 18-hole layout — rounds can use the front 9, back 9, or all 18.</p>
+      <div class="field" id="courseEditorLengthRadios">
+        <label>Course Length</label>
+        <div class="radio-row">
+          <label class="radio-chip"><input type="radio" name="courseEditorLength" value="18" checked><span>18 Holes</span></label>
+          <label class="radio-chip"><input type="radio" name="courseEditorLength" value="9"><span>9 Holes</span></label>
+        </div>
+      </div>
+      <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
+      <p class="helper-text" style="margin-top:-4px;">Top box = par, bottom box = stroke index. An 18-hole course can be used as the front 9, back 9, or all 18 in a round. A 9-hole course is always used as its own 9 holes.</p>
       <div class="hole-grid" id="courseEditorHoleGrid"></div>
       <button class="btn btn-primary btn-block" id="saveCourseBtn" style="margin-top:16px;">Save Course</button>
     </div>
