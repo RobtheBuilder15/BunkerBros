@@ -87,14 +87,16 @@ function resizeRoundHoles(round, newCount) {
   }
 }
 
-// Pulls a 9- or 18-hole par/index layout out of a shared library course
-// (which always stores a full 18-hole layout) for a given holeSet
-// ('18' | 'front9' | 'back9'), renumbered locally to 1..9 or 1..18 so it
-// slots directly into course.holes the same way a hand-entered course
-// always has — nothing else in the app needs to know the holes originally
-// came from holes 10–18 of the source course.
+// Pulls a 9- or 18-hole par/index layout out of a shared library course for
+// a given holeSet ('18' | 'front9' | 'back9'), renumbered locally to 1..9 or
+// 1..18 so it slots directly into course.holes the same way a hand-entered
+// course always has. Library courses can themselves be either 9 or 18 holes
+// (see the Course Length toggle in the course editor) — a 9-hole library
+// course has no front9/back9 distinction, so any holeSet value just returns
+// its single 9-hole layout as-is.
 function holesForSet(libraryHoles, holeSet) {
   const src = (libraryHoles || []).slice().sort((a, b) => a.number - b.number);
+  if (src.length <= 9) return src.map((h, i) => ({ number: i + 1, par: h.par, index: h.index }));
   let slice;
   if (holeSet === 'front9') slice = src.slice(0, 9);
   else if (holeSet === 'back9') slice = src.slice(9, 18);
@@ -1236,7 +1238,7 @@ function renderRoundsView() {
     let yearNav = sectionTitle.querySelector('.year-nav');
     const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
     if (appReady() && hasMultipleYears) {
-      const html = seasonArrowNavHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      const html = seasonArrowNavHtml(`${state.year}`);
       if (!yearNav) {
         sectionTitle.insertAdjacentHTML('beforeend', html);
         yearNav = sectionTitle.querySelector('.year-nav');
@@ -1357,7 +1359,7 @@ function renderRoundsView() {
       const sCells = rc.perHole.map(h => {
         if (!h.meta) return `<td class="${holeColClasses(course, h.number)}"></td>`;
         if (h.meta.winner) return `<td class="${holeColClasses(course, h.number)}"><span class="skin-won">${initial(h.meta.winner)}${h.meta.skinsWon > 1 ? ` ×${h.meta.skinsWon}` : ''}</span></td>`;
-        if (h.meta.tied) return `<td class="${holeColClasses(course, h.number)}"><span class="skin-carry">carry →</span></td>`;
+        if (h.meta.tied) return `<td class="${holeColClasses(course, h.number)}"><span class="skin-carry">→</span></td>`;
         return `<td class="${holeColClasses(course, h.number)}"></td>`;
       });
       html += assembleRow(`<td>💰 Skins (${pointValue} pt ea)</td>`, sCells, holeCount, '<td class="out-col"></td>', '<td class="in-col"></td>', '<td class="total-col"></td>', 'indicator-row');
@@ -1607,7 +1609,7 @@ function renderStats() {
     let yearNav = sectionTitle.querySelector('.year-nav');
     const hasMultipleYears = ((liveRoomState || state).archivedSeasons || []).length > 0;
     if (appReady() && hasMultipleYears && statsMode === 'weekend') {
-      const html = seasonArrowNavHtml(`${state.year}` + (isViewingLive() ? '' : ' (archived)'));
+      const html = seasonArrowNavHtml(`${state.year}`);
       if (!yearNav) {
         sectionTitle.insertAdjacentHTML('beforeend', html);
         yearNav = sectionTitle.querySelector('.year-nav');
@@ -2477,12 +2479,18 @@ const GAME_TYPE_ORDER = ['none', 'matchplay3', 'wolf', '111', 'skins', 'scramble
 
 // Applies a chosen library course to a round's course config — shared by
 // both the combo box's "pick a result" flow and anywhere else that needs
-// to load a saved course onto a round (e.g. the course editor's Save).
+// to load a saved course onto a round (e.g. the course editor's Save). If
+// the library course itself is only 9 holes, front9/back9/18 are all the
+// same single layout, so the round's holeSet is normalized to 'front9'
+// (used as the generic "9 holes" flag) rather than leaving a stale '18' or
+// 'back9' value that would be misleading in the Holes dropdown.
 function applyLibraryCourseToRound(roundIdx, lib) {
   const course = courseFor(roundIdx);
   const round = state.rounds[roundIdx - 1];
+  const libIs9 = (lib.holes || []).length <= 9;
   course.courseId = lib.id;
   course.name = lib.name;
+  if (libIs9 && course.holeSet === '18') course.holeSet = 'front9';
   course.holes = holesForSet(lib.holes, course.holeSet || '18');
   const newCount = holeSetToCount(course.holeSet || '18');
   resizeCourseHoles(course, newCount);
@@ -2577,15 +2585,21 @@ function courseCard(roundIdx, dis) {
   const rotationOpts = is666 ? oneOneOneRotationOptions(c.holeCount || 18) : [];
   const currentRotation = (round.rotateEvery && rotationOpts.includes(round.rotateEvery)) ? round.rotateEvery : (rotationOpts[rotationOpts.length - 1] || 1);
   const currentCourseName = c.courseId ? (findCourseInLibrary(c.courseId)?.name || c.name) : '';
+  const linkedLib = c.courseId ? findCourseInLibrary(c.courseId) : null;
+  const linkedIs9 = linkedLib && (linkedLib.holes || []).length <= 9;
+  const holesSelectOpts = linkedIs9
+    ? `<option value="front9" selected>9 Holes</option>`
+    : `<option value="18" ${c.holeSet === '18' ? 'selected' : ''}>18 Holes</option>
+        <option value="front9" ${c.holeSet === 'front9' ? 'selected' : ''}>9 Holes (Front)</option>
+        <option value="back9" ${c.holeSet === 'back9' ? 'selected' : ''}>9 Holes (Back)</option>`;
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
-      <div class="field"><label>Holes</label><select class="cfgRoundHoles" data-round="${roundIdx}" ${dis}>
-        <option value="18" ${c.holeSet === '18' ? 'selected' : ''}>18 Holes</option>
-        <option value="front9" ${c.holeSet === 'front9' ? 'selected' : ''}>9 Holes (Front)</option>
-        <option value="back9" ${c.holeSet === 'back9' ? 'selected' : ''}>9 Holes (Back)</option>
+      <div class="field"><label>Holes</label><select class="cfgRoundHoles" data-round="${roundIdx}" ${dis || linkedIs9 ? 'disabled' : ''}>
+        ${holesSelectOpts}
       </select></div>
     </div>
+    ${linkedIs9 ? `<p class="helper-text" style="margin-top:-8px;">This saved course is 9 holes, so the round is locked to 9.</p>` : ''}
     <div class="field course-combo-field">
       <label>Course</label>
       <div class="course-combo" data-round="${roundIdx}">
@@ -3591,6 +3605,18 @@ document.getElementById('clearHoleBtn')?.addEventListener('click', () => {
 // and (if editing) which existing library course id is being updated.
 let courseEditorRoundIdx = null;
 let courseEditorCourseId = null;
+let courseEditorLength = 18; // 18 | 9 — how many hole boxes the grid currently shows
+
+function renderCourseEditorGrid(n, holesVal) {
+  const grid = document.getElementById('courseEditorHoleGrid');
+  const vals = holesVal || defaultHoles(n);
+  grid.innerHTML = vals.slice(0, n).map((h, i) => `
+    <div class="field hole-par-input">
+      <label>Hole ${h.number}</label>
+      <input type="number" class="courseEditorPar" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;">
+      <input type="number" class="courseEditorIndex" data-hole-idx="${i}" value="${h.index}">
+    </div>`).join('');
+}
 
 function openCourseEditor(roundIdx, courseId) {
   courseEditorRoundIdx = roundIdx;
@@ -3603,20 +3629,25 @@ function openCourseEditor(roundIdx, courseId) {
 
   let nameVal = '';
   let holesVal = defaultHoles(18);
+  courseEditorLength = 18;
   if (isEdit) {
     const lib = findCourseInLibrary(courseId);
-    if (lib) { nameVal = lib.name; holesVal = holesForSet(lib.holes, '18'); }
+    if (lib) {
+      nameVal = lib.name;
+      courseEditorLength = (lib.holes || []).length <= 9 ? 9 : 18;
+      holesVal = holesForSet(lib.holes, '18');
+    }
   }
   document.getElementById('courseEditorName').value = nameVal;
 
-  const grid = document.getElementById('courseEditorHoleGrid');
-  grid.innerHTML = holesVal.map((h, i) => `
-    <div class="field hole-par-input">
-      <label>Hole ${h.number}</label>
-      <input type="number" class="courseEditorPar" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;">
-      <input type="number" class="courseEditorIndex" data-hole-idx="${i}" value="${h.index}">
-    </div>`).join('');
+  const lengthRadios = document.getElementById('courseEditorLengthRadios');
+  if (lengthRadios) {
+    lengthRadios.querySelectorAll('input[name="courseEditorLength"]').forEach(inp => {
+      inp.checked = Number(inp.value) === courseEditorLength;
+    });
+  }
 
+  renderCourseEditorGrid(courseEditorLength, holesVal);
   document.getElementById('courseEditorModal').classList.remove('hidden');
 }
 
@@ -3624,6 +3655,33 @@ function closeCourseEditor() { document.getElementById('courseEditorModal').clas
 
 document.getElementById('closeCourseEditorBtn').addEventListener('click', closeCourseEditor);
 document.getElementById('courseEditorModal').addEventListener('click', (e) => { if (e.target.id === 'courseEditorModal') closeCourseEditor(); });
+
+const courseEditorLengthRadiosEl = document.getElementById('courseEditorLengthRadios');
+if (courseEditorLengthRadiosEl) {
+  courseEditorLengthRadiosEl.querySelectorAll('input[name="courseEditorLength"]').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const newLength = Number(inp.value);
+      if (newLength === courseEditorLength) return;
+      if (newLength < courseEditorLength) {
+        const currentPars = Array.from(document.querySelectorAll('.courseEditorPar')).map((el, i) => ({ number: i + 1, par: Number(el.value) || 4, index: Number(document.querySelectorAll('.courseEditorIndex')[i].value) || 1 }));
+        if (!confirm('Switching to 9 holes will discard pars/indexes entered for holes 10–18. Continue?')) {
+          courseEditorLengthRadiosEl.querySelectorAll('input[name="courseEditorLength"]').forEach(r => { r.checked = Number(r.value) === courseEditorLength; });
+          return;
+        }
+        courseEditorLength = newLength;
+        renderCourseEditorGrid(courseEditorLength, currentPars);
+      } else {
+        // Growing 9 -> 18: keep the existing 9 boxes' values and pad the
+        // back nine with sensible defaults rather than losing the front 9.
+        const currentPars = Array.from(document.querySelectorAll('.courseEditorPar')).map((el, i) => ({ number: i + 1, par: Number(el.value) || 4, index: Number(document.querySelectorAll('.courseEditorIndex')[i].value) || 1 }));
+        const defaults = defaultHoles(18);
+        const padded = defaults.map((d, i) => currentPars[i] ? { number: i + 1, par: currentPars[i].par, index: currentPars[i].index } : { number: i + 1, par: d.par, index: d.index });
+        courseEditorLength = newLength;
+        renderCourseEditorGrid(courseEditorLength, padded);
+      }
+    });
+  });
+}
 
 document.getElementById('saveCourseBtn').addEventListener('click', async () => {
   const name = document.getElementById('courseEditorName').value.trim();
