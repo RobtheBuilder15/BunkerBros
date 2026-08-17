@@ -309,6 +309,10 @@ tr.bestball-row, tr.indicator-row { background: #F5EDDF; }
 tr.bestball-row td { font-weight: 700; color: var(--ink); }
 tr.indicator-row td { font-size: 0.66rem; font-weight: 700; color: var(--ink); padding-top: 3px; padding-bottom: 3px; }
 .indicator-blind { color: var(--rust); }
+.wolf-tee-highlight { color: var(--rust); font-weight: 800; }
+
+/* Expand/collapse toggle for a round settings card (Scorecard settings) */
+.round-card-expanded { border-top: 1.5px dashed rgba(28,61,46,0.18); padding-top: 12px; }
 
 /* Skins indicator (won hole / carried over) */
 .skin-won { color: #4C8A5E; font-weight: 800; }
