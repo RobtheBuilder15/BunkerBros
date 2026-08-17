@@ -419,20 +419,28 @@ function matchPlayHolePoints(holeData, ids, holeIndex, holeCount) {
 // Wolf tee order for a hole, generalized to work for either 3 or 4
 // players (previously hardcoded to exactly 3). Front-nine (or first-half,
 // for 9-hole rounds) walks the base order; back-nine walks it reversed.
-// Returns the wolf for this hole plus every other player in seat order
-// (so callers can build "team with X" options without assuming there are
-// exactly 2 other players, as the old first/second scheme did).
+// The WOLF is whoever tees off LAST in the current teeing group for that
+// hole — i.e. the last name in the (rotating) order, not the first — since
+// seeing everyone else's tee shot first is the actual advantage/disadvantage
+// that makes someone "the wolf." Returns the wolf for this hole, the full
+// teeing-off order for that hole (for display), and every other player (so
+// callers can build "team with X" options without assuming there are
+// exactly 2 other players).
 function getWolfOrderForHole(round, holeNumber, holeCountForRound) {
   const ids = playerIds();
   const n = ids.length;
   const base = (round.wolfOrder && round.wolfOrder.length === n) ? round.wolfOrder : ids;
   const half = Math.ceil((holeCountForRound || 18) / 2);
-  let order, idx;
-  if (holeNumber <= half) { order = base; idx = (holeNumber - 1) % n; }
-  else { order = [...base].reverse(); idx = (holeNumber - half - 1) % n; }
-  const wolfPlayer = order[idx];
-  const others = order.filter((_, i) => i !== idx);
-  return { wolf: wolfPlayer, others };
+  let order, rotIdx;
+  if (holeNumber <= half) { order = base; rotIdx = (holeNumber - 1) % n; }
+  else { order = [...base].reverse(); rotIdx = (holeNumber - half - 1) % n; }
+  // Rotate `order` so this hole's teeing group ends with the wolf: shifting
+  // left by rotIdx means the player who was at position 0 on hole 1 (the
+  // wolf-designate at that point in the rotation) lands in the LAST slot.
+  const teeOrder = order.slice(rotIdx).concat(order.slice(0, rotIdx));
+  const wolfPlayer = teeOrder[n - 1];
+  const others = teeOrder.slice(0, n - 1);
+  return { wolf: wolfPlayer, others, teeOrder };
 }
 
 // Divisors of holeCountForRound that make sense as a 6-6-6 rotation
@@ -1744,7 +1752,7 @@ async function afterLogin() {
 // while another has the app open, the second person's course picker
 // updates without needing a manual refresh.
 async function loadCourseLibrary() {
-  const { data, error } = await auth.client.from('golf_courses').select('id, name, holes').order('name', { ascending: true });
+  const { data, error } = await auth.client.from('golf_courses').select('id, name, holes, default_ctp_hole, default_ld_hole').order('name', { ascending: true });
   if (error) { console.warn('Could not load course library', error); return; }
   courseLibrary = data || [];
   courseLibraryLoaded = true;
@@ -1770,8 +1778,12 @@ function findCourseInLibrary(id) { return courseLibrary.find(c => c.id === id); 
 // Saves (inserts or updates) a course into the shared library. Used both
 // by "+ Add New Course" (insert) and "Edit This Course" (update in place —
 // affects every room/round currently pointing at this course id).
-async function saveCourseToLibrary(courseId, name, holes) {
-  const payload = { name, holes, updated_at: new Date().toISOString() };
+// defaultCtpHole/defaultLdHole are just the hole numbers that pre-fill a
+// round's CTP/Longest Drive selectors whenever this course gets linked to
+// a round (see applyLibraryCourseToRound) — they don't affect any round
+// already using this course.
+async function saveCourseToLibrary(courseId, name, holes, defaultCtpHole, defaultLdHole) {
+  const payload = { name, holes, default_ctp_hole: defaultCtpHole || null, default_ld_hole: defaultLdHole || null, updated_at: new Date().toISOString() };
   if (courseId) {
     const { error } = await auth.client.from('golf_courses').update(payload).eq('id', courseId);
     if (error) { showToast('Could not save course'); return null; }
@@ -2495,6 +2507,11 @@ function applyLibraryCourseToRound(roundIdx, lib) {
   const newCount = holeSetToCount(course.holeSet || '18');
   resizeCourseHoles(course, newCount);
   resizeRoundHoles(round, newCount);
+  // Pre-fill CTP/Longest Drive from the course's saved defaults (clamped
+  // to the currently loaded hole count) — still just a starting point,
+  // the user can change them per-round afterward via the CTP/LD inputs.
+  if (lib.default_ctp_hole) course.ctpHole = Math.min(Math.max(1, lib.default_ctp_hole), newCount);
+  if (lib.default_ld_hole) course.ldHole = Math.min(Math.max(1, lib.default_ld_hole), newCount);
   saveState();
 }
 
@@ -2568,6 +2585,11 @@ function wireCourseCombo(inp) {
   }
 }
 
+// Which rounds currently have their "Expand" section open in Settings —
+// keyed by round index (1-based), persists across re-renders of the
+// settings panel within the session (not saved to room state).
+let expandedRoundCards = {};
+
 function courseCard(roundIdx, dis) {
   dis = dis || '';
   const c = courseFor(roundIdx);
@@ -2592,6 +2614,11 @@ function courseCard(roundIdx, dis) {
     : `<option value="18" ${c.holeSet === '18' ? 'selected' : ''}>18 Holes</option>
         <option value="front9" ${c.holeSet === 'front9' ? 'selected' : ''}>9 Holes (Front)</option>
         <option value="back9" ${c.holeSet === 'back9' ? 'selected' : ''}>9 Holes (Back)</option>`;
+  const isExpanded = !!expandedRoundCards[roundIdx];
+
+  // Compact summary row, always visible: game, hole count, course name,
+  // CTP/LD holes. Everything else (date, winner, exclude toggles, rotation,
+  // course search/edit, par & index grid) lives behind "Expand".
   return `<div class="card"><p class="eyebrow">Round ${roundIdx} — Game &amp; Course</p>
     <div class="field-row">
       <div class="field"><label>Game</label><select class="cfgRoundType" data-round="${roundIdx}" ${dis}>${typeOpts}</select></div>
@@ -2600,56 +2627,60 @@ function courseCard(roundIdx, dis) {
       </select></div>
     </div>
     ${linkedIs9 ? `<p class="helper-text" style="margin-top:-8px;">This saved course is 9 holes, so the round is locked to 9.</p>` : ''}
-    <div class="field course-combo-field">
-      <label>Course</label>
-      <div class="course-combo" data-round="${roundIdx}">
-        <input type="text" class="course-combo-input" data-round="${roundIdx}" data-course-id="${c.courseId || ''}"
-          value="${c.courseId ? escapeHtml(currentCourseName) : ''}"
-          placeholder="Search saved courses or leave blank for custom…" autocomplete="off" ${dis}>
-        <button type="button" class="course-combo-clear" data-round="${roundIdx}" style="display:${c.courseId ? 'flex' : 'none'};" ${dis} aria-label="Clear course selection">×</button>
-        <div class="course-combo-list" data-round="${roundIdx}" style="display:none;"></div>
-      </div>
-      <p class="helper-text" style="margin-top:6px;">${c.courseId ? 'Linked to a saved course.' : 'Type to search saved courses — leave blank to keep a one-off custom course.'}</p>
-    </div>
-    ${c.courseId ? '' : `<div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>`}
-    ${dis ? '' : `<div class="field-row">
-      <button type="button" class="btn btn-secondary cfgAddCourseBtn" data-round="${roundIdx}" style="flex:1;">+ Add New Course</button>
-      ${c.courseId ? `<button type="button" class="btn btn-secondary cfgEditCourseBtn" data-round="${roundIdx}" style="flex:1;">✏️ Edit This Course</button>` : ''}
-    </div>
-    <p class="helper-text" style="margin-top:8px;">Courses are shared across every room — saving or editing one here updates it everywhere it's used.</p>`}
-    ${is666 ? `
-    <div class="field"><label>Rotate Solo Player Every</label><select class="cfgRotateEvery" data-round="${roundIdx}" ${dis}>
-        ${rotationOpts.map(n => `<option value="${n}" ${currentRotation === n ? 'selected' : ''}>${n} hole${n === 1 ? '' : 's'}</option>`).join('')}
-      </select>
-      <p class="helper-text" style="margin-top:6px;">Classic "6-6-6" rotates every 6 holes on an 18-hole round. Only frequencies that divide evenly into this round's hole count are offered.</p>
-    </div>` : ''}
-    ${isScramble ? `<p class="helper-text" style="margin:0 0 10px;">Scramble has no Closest to the Pin or Longest Drive — it's just for fun and never counts toward the leaderboard.</p>` : `
+    <div class="field"><label>Course Name</label><p style="margin:4px 0 0; font-weight:700; font-size:0.9rem;">${c.courseId ? escapeHtml(currentCourseName) : (c.name ? escapeHtml(c.name) : '<span style="opacity:0.5;">Custom / unnamed</span>')}</p></div>
+    ${isScramble ? `<p class="helper-text" style="margin:8px 0 0;">Scramble has no Closest to the Pin or Longest Drive.</p>` : `
     <div class="field-row">
       <div class="field"><label>Closest to the Pin — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgCtpHole" data-round="${roundIdx}" value="${c.ctpHole}" ${dis}></div>
       <div class="field"><label>Longest Drive — Hole #</label><input type="number" min="1" max="${c.holeCount}" class="cfgLdHole" data-round="${roundIdx}" value="${c.ldHole}" ${dis}></div>
     </div>`}
-    <div class="field-row">
-      <div class="field"><label>Round Date</label><input type="date" class="cfgRoundDate" data-round="${roundIdx}" value="${round.date || ''}" ${dis}></div>
-      ${isScramble ? '' : `<div class="field"><label>Round Winner</label><select class="cfgRoundWinner" data-round="${roundIdx}" ${dis}>${winnerOpts}</select></div>`}
-    </div>
-    ${isScramble ? '' : `
-    <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0;">
-      <input type="checkbox" class="cfgExcludeLifetime" data-round="${roundIdx}" ${round.excludeFromLifetime ? 'checked' : ''} style="width:auto;" ${dis}>
-      <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Exclude this round from lifetime stats</label>
-    </div>
-    <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0; margin-top:10px;">
-      <input type="checkbox" class="cfgExcludeStats" data-round="${roundIdx}" ${round.excludeFromStats ? 'checked' : ''} style="width:auto;" ${dis}>
-      <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Ignore this round's stats (birdies, Wolf/6-6-6/Skins records, etc.)</label>
-    </div>
-    <p class="helper-text" style="margin-top:6px;">The round's points still count toward the leaderboard and lifetime score — this only leaves it out of the Stats tab breakdowns (birdies/pars, Wolf/6-6-6/Skins records, CTP &amp; Longest Drive wins, best round, daily wins).</p>`}
-    <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.${c.courseId ? ' Linked to a shared course — use "✏️ Edit This Course" above to change these.' : ''}</p>
-    <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
-    <div class="hole-grid">${c.holes.map((h, i) => `
-      <div class="field hole-par-input">
-        <label>Hole ${h.number}</label>
-        <input type="number" class="cfgHolePar" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;" ${dis || c.courseId ? 'disabled' : ''}>
-        <input type="number" class="cfgHoleIndex" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.index}" ${dis || c.courseId ? 'disabled' : ''}>
-      </div>`).join('')}
+    <button type="button" class="btn btn-ghost btn-block cfgExpandRoundBtn" data-round="${roundIdx}" style="margin-top:4px;">${isExpanded ? '− Hide Round Details' : '+ Expand Round Details'}</button>
+    <div class="round-card-expanded" data-round="${roundIdx}" style="display:${isExpanded ? 'block' : 'none'}; margin-top:14px;">
+      <div class="field course-combo-field">
+        <label>Course</label>
+        <div class="course-combo" data-round="${roundIdx}">
+          <input type="text" class="course-combo-input" data-round="${roundIdx}" data-course-id="${c.courseId || ''}"
+            value="${c.courseId ? escapeHtml(currentCourseName) : ''}"
+            placeholder="Search saved courses or leave blank for custom…" autocomplete="off" ${dis}>
+          <button type="button" class="course-combo-clear" data-round="${roundIdx}" style="display:${c.courseId ? 'flex' : 'none'};" ${dis} aria-label="Clear course selection">×</button>
+          <div class="course-combo-list" data-round="${roundIdx}" style="display:none;"></div>
+        </div>
+        <p class="helper-text" style="margin-top:6px;">${c.courseId ? 'Linked to a saved course.' : 'Type to search saved courses — leave blank to keep a one-off custom course.'}</p>
+      </div>
+      ${c.courseId ? '' : `<div class="field"><label>Course Name</label><input type="text" class="cfgCourseName" data-round="${roundIdx}" value="${escapeHtml(c.name)}" ${dis}></div>`}
+      ${dis ? '' : `<div class="field-row">
+        <button type="button" class="btn btn-secondary cfgAddCourseBtn" data-round="${roundIdx}" style="flex:1;">+ Add New Course</button>
+        ${c.courseId ? `<button type="button" class="btn btn-secondary cfgEditCourseBtn" data-round="${roundIdx}" style="flex:1;">✏️ Edit This Course</button>` : ''}
+      </div>
+      <p class="helper-text" style="margin-top:8px;">Courses are shared across every room — saving or editing one here updates it everywhere it's used.</p>`}
+      ${is666 ? `
+      <div class="field"><label>Rotate Solo Player Every</label><select class="cfgRotateEvery" data-round="${roundIdx}" ${dis}>
+          ${rotationOpts.map(n => `<option value="${n}" ${currentRotation === n ? 'selected' : ''}>${n} hole${n === 1 ? '' : 's'}</option>`).join('')}
+        </select>
+        <p class="helper-text" style="margin-top:6px;">Classic "6-6-6" rotates every 6 holes on an 18-hole round. Only frequencies that divide evenly into this round's hole count are offered.</p>
+      </div>` : ''}
+      <div class="field-row">
+        <div class="field"><label>Round Date</label><input type="date" class="cfgRoundDate" data-round="${roundIdx}" value="${round.date || ''}" ${dis}></div>
+        ${isScramble ? '' : `<div class="field"><label>Round Winner</label><select class="cfgRoundWinner" data-round="${roundIdx}" ${dis}>${winnerOpts}</select></div>`}
+      </div>
+      ${isScramble ? '' : `
+      <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0;">
+        <input type="checkbox" class="cfgExcludeLifetime" data-round="${roundIdx}" ${round.excludeFromLifetime ? 'checked' : ''} style="width:auto;" ${dis}>
+        <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Exclude this round from lifetime stats</label>
+      </div>
+      <div class="field" style="display:flex; align-items:center; gap:10px; margin-bottom:0; margin-top:10px;">
+        <input type="checkbox" class="cfgExcludeStats" data-round="${roundIdx}" ${round.excludeFromStats ? 'checked' : ''} style="width:auto;" ${dis}>
+        <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Ignore this round's stats (birdies, Wolf/6-6-6/Skins records, etc.)</label>
+      </div>
+      <p class="helper-text" style="margin-top:6px;">The round's points still count toward the leaderboard and lifetime score — this only leaves it out of the Stats tab breakdowns (birdies/pars, Wolf/6-6-6/Skins records, CTP &amp; Longest Drive wins, best round, daily wins).</p>`}
+      <p class="helper-text" style="margin-top:10px;">Top box = par, bottom box = stroke index.${c.courseId ? ' Linked to a shared course — use "✏️ Edit This Course" above to change these.' : ''}</p>
+      <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
+      <div class="hole-grid">${c.holes.map((h, i) => `
+        <div class="field hole-par-input">
+          <label>Hole ${h.number}</label>
+          <input type="number" class="cfgHolePar" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.par}" style="margin-bottom:4px;" ${dis || c.courseId ? 'disabled' : ''}>
+          <input type="number" class="cfgHoleIndex" data-round="${roundIdx}" data-hole-idx="${i}" value="${h.index}" ${dis || c.courseId ? 'disabled' : ''}>
+        </div>`).join('')}
+      </div>
     </div>
   </div>`;
 }
@@ -2737,6 +2768,64 @@ function removeLastRound() {
   saveState(); renderAll();
 }
 
+// Which per-game settings block is currently showing under "Daily Game
+// Settings" — a single dropdown now stands in for what used to be six
+// separate always-visible cards (Daily Game Points, Stableford, Side
+// Games, Wolf, 6-6-6, Skins, Best Ball).
+let dailyGameSettingsMode = 'daily';
+
+function dailyGameSettingsBody(mode, c, dis) {
+  if (mode === 'daily') {
+    return `<div class="field-row">
+      <div class="field"><label>1st Place</label><input type="number" id="cfgFirst" value="${c.dailyGame.first}" ${dis}></div>
+      <div class="field"><label>2nd Place</label><input type="number" id="cfgSecond" value="${c.dailyGame.second}" ${dis}></div>
+    </div>
+    <p class="helper-text">Ties split the combined points evenly across tied positions.</p>`;
+  }
+  if (mode === 'stableford') {
+    return `<div class="field-row">
+      <div class="field"><label>Bogey</label><input type="number" id="cfgBogey" value="${c.stableford.bogey}" ${dis}></div>
+      <div class="field"><label>Par</label><input type="number" id="cfgPar" value="${c.stableford.par}" ${dis}></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Birdie</label><input type="number" id="cfgBirdie" value="${c.stableford.birdie}" ${dis}></div>
+      <div class="field"><label>Eagle</label><input type="number" id="cfgEagle" value="${c.stableford.eagle}" ${dis}></div>
+    </div>
+    <div class="field"><label>Albatross</label><input type="number" id="cfgAlbatross" value="${c.stableford.albatross}" ${dis}></div>`;
+  }
+  if (mode === 'sidegames') {
+    return `<div class="field"><label>Points per Side Game Win</label><input type="number" id="cfgSideGamePoints" value="${c.sideGamePoints}" ${dis}></div>
+    <p class="helper-text">CTP &amp; Longest Drive holes are set per-round on each round's card below.</p>`;
+  }
+  if (mode === 'wolf') {
+    return `<p class="helper-text" style="margin-top:0;">${[3,4].includes(c.players.length) ? '' : 'Requires 3 or 4 players — '}Wolf is the player who tees off last in the current teeing order.</p>
+    <div class="field-row">
+      <div class="field"><label>Solo/Lone Win</label><input type="number" id="cfgWolfSoloWin" value="${c.wolf.soloWin}" ${dis}></div>
+      <div class="field"><label>Team Win (each)</label><input type="number" id="cfgWolfTeamWin" value="${c.wolf.teamWin}" ${dis}></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Opponents Win (each)</label><input type="number" id="cfgWolfOppWin" value="${c.wolf.opponentWin}" ${dis}></div>
+      <div class="field"><label>Blind Wolf Multiplier</label><input type="number" step="0.5" id="cfgWolfBlindMult" value="${c.wolf.blindMultiplier}" ${dis}></div>
+    </div>
+    <p class="helper-text">Blind Wolf = going lone before seeing any tee shots. Whatever the hole's points would be, they're multiplied by this value. Works with 3 or 4 players in the room — outside that range, Wolf rounds auto-convert to Match Play.</p>`;
+  }
+  if (mode === '111') {
+    return `<div class="field-row">
+      <div class="field"><label>Solo Win</label><input type="number" id="cfg111Solo" value="${c.oneOneOne.soloWin}" ${dis}></div>
+      <div class="field"><label>Team Win (each)</label><input type="number" id="cfg111Team" value="${c.oneOneOne.teamWin}" ${dis}></div>
+    </div>
+    <p class="helper-text">"6-6-6" is the classic name for this game when the solo player rotates every 6 holes — the rotation frequency for each round using this game type is set on that round's card below.</p>`;
+  }
+  if (mode === 'skins') {
+    return `<div class="field"><label>Points per Skin</label><input type="number" step="0.5" id="cfgSkinsPointValue" value="${(c.skins && c.skins.pointValue) || 1}" ${dis}></div>
+    <p class="helper-text">Lowest score on a hole wins the skin(s) riding on it. Ties carry every skin on that hole over to the next hole.</p>`;
+  }
+  if (mode === 'bestball') {
+    return `<div class="field"><label>Best Ball Score Goal</label><input type="number" id="cfgBestBallGoal" value="${c.bestBallGoal}" ${dis}></div>`;
+  }
+  return '';
+}
+
 function renderGameSettings() {
   const c = state.config;
   const el = document.getElementById('gameSettingsSection');
@@ -2783,29 +2872,17 @@ function renderGameSettings() {
   }
   html += `</div>`;
 
-  html += `<div class="card"><p class="eyebrow">Daily Game Points</p>
-    <div class="field-row">
-      <div class="field"><label>1st Place</label><input type="number" id="cfgFirst" value="${c.dailyGame.first}" ${dis}></div>
-      <div class="field"><label>2nd Place</label><input type="number" id="cfgSecond" value="${c.dailyGame.second}" ${dis}></div>
-    </div>
-    <p class="helper-text">Ties split the combined points evenly across tied positions.</p>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">Stableford Points</p>
-    <div class="field-row">
-      <div class="field"><label>Bogey</label><input type="number" id="cfgBogey" value="${c.stableford.bogey}" ${dis}></div>
-      <div class="field"><label>Par</label><input type="number" id="cfgPar" value="${c.stableford.par}" ${dis}></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>Birdie</label><input type="number" id="cfgBirdie" value="${c.stableford.birdie}" ${dis}></div>
-      <div class="field"><label>Eagle</label><input type="number" id="cfgEagle" value="${c.stableford.eagle}" ${dis}></div>
-    </div>
-    <div class="field"><label>Albatross</label><input type="number" id="cfgAlbatross" value="${c.stableford.albatross}" ${dis}></div>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">Side Games</p>
-    <div class="field"><label>Points per Side Game Win</label><input type="number" id="cfgSideGamePoints" value="${c.sideGamePoints}" ${dis}></div>
-    <p class="helper-text">CTP &amp; Longest Drive holes are set per-course below.</p>
+  html += `<div class="card"><p class="eyebrow">Daily Game Settings</p>
+    <div class="field"><label>Show Settings For</label><select id="dailyGameSettingsPicker">
+      <option value="daily" ${dailyGameSettingsMode === 'daily' ? 'selected' : ''}>Daily Game Points</option>
+      <option value="stableford" ${dailyGameSettingsMode === 'stableford' ? 'selected' : ''}>Stableford Points</option>
+      <option value="sidegames" ${dailyGameSettingsMode === 'sidegames' ? 'selected' : ''}>Side Games (CTP / Longest Drive)</option>
+      <option value="wolf" ${dailyGameSettingsMode === 'wolf' ? 'selected' : ''}>Wolf Point Allocation</option>
+      <option value="111" ${dailyGameSettingsMode === '111' ? 'selected' : ''}>6-6-6 Point Allocation</option>
+      <option value="skins" ${dailyGameSettingsMode === 'skins' ? 'selected' : ''}>Skins</option>
+      <option value="bestball" ${dailyGameSettingsMode === 'bestball' ? 'selected' : ''}>Round 1 Best Ball</option>
+    </select></div>
+    <div id="dailyGameSettingsBody" style="margin-top:6px;">${dailyGameSettingsBody(dailyGameSettingsMode, c, dis)}</div>
   </div>`;
 
   html += `<div class="card"><p class="eyebrow">Scoring Permissions</p>
@@ -2814,35 +2891,6 @@ function renderGameSettings() {
       <label style="margin:0; text-transform:none; font-size:0.85rem; font-weight:600; color:var(--ink);">Anyone in this room can edit anyone's score</label>
     </div>
     <p class="helper-text" style="margin-top:8px;">Off by default — normally each Bro can only edit their own strokes once they've picked their player in Account &amp; Rooms.</p>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">Wolf Point Allocation${[3,4].includes(c.players.length) ? '' : ' (3 or 4 players)'}</p>
-    <div class="field-row">
-      <div class="field"><label>Solo/Lone Win</label><input type="number" id="cfgWolfSoloWin" value="${c.wolf.soloWin}" ${dis}></div>
-      <div class="field"><label>Team Win (each)</label><input type="number" id="cfgWolfTeamWin" value="${c.wolf.teamWin}" ${dis}></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>Opponents Win (each)</label><input type="number" id="cfgWolfOppWin" value="${c.wolf.opponentWin}" ${dis}></div>
-      <div class="field"><label>Blind Wolf Multiplier</label><input type="number" step="0.5" id="cfgWolfBlindMult" value="${c.wolf.blindMultiplier}" ${dis}></div>
-    </div>
-    <p class="helper-text">Blind Wolf = going lone before seeing any tee shots. Whatever the hole's points would be, they're multiplied by this value. Works with 3 or 4 players in the room — outside that range, Wolf rounds auto-convert to Match Play.</p>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">6-6-6 Point Allocation</p>
-    <div class="field-row">
-      <div class="field"><label>Solo Win</label><input type="number" id="cfg111Solo" value="${c.oneOneOne.soloWin}" ${dis}></div>
-      <div class="field"><label>Team Win (each)</label><input type="number" id="cfg111Team" value="${c.oneOneOne.teamWin}" ${dis}></div>
-    </div>
-    <p class="helper-text">"6-6-6" is the classic name for this game when the solo player rotates every 6 holes — the rotation frequency for each round using this game type is set on that round's card below.</p>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">Skins</p>
-    <div class="field"><label>Points per Skin</label><input type="number" step="0.5" id="cfgSkinsPointValue" value="${(c.skins && c.skins.pointValue) || 1}" ${dis}></div>
-    <p class="helper-text">Lowest score on a hole wins the skin(s) riding on it. Ties carry every skin on that hole over to the next hole.</p>
-  </div>`;
-
-  html += `<div class="card"><p class="eyebrow">Round 1 Best Ball</p>
-    <div class="field"><label>Best Ball Score Goal</label><input type="number" id="cfgBestBallGoal" value="${c.bestBallGoal}" ${dis}></div>
   </div>`;
 
   html += state.rounds.map((r, i) => courseCard(i + 1, dis)).join('');
@@ -2866,6 +2914,9 @@ function renderGameSettings() {
       else showToast('Incorrect PIN');
     });
   }
+  const dailyPicker = document.getElementById('dailyGameSettingsPicker');
+  if (dailyPicker) dailyPicker.addEventListener('change', () => { dailyGameSettingsMode = dailyPicker.value; renderGameSettings(); });
+
   if (!editable) return;
 
   const addPlayerBtn = document.getElementById('addPlayerBtn');
@@ -2921,6 +2972,13 @@ function renderGameSettings() {
       const v = Number(inp.value);
       state.config.players[Number(inp.dataset.playerIdx)].handicap = isNaN(v) ? 0 : v;
       saveState(); refreshNonSettingsViews();
+    });
+  });
+  el.querySelectorAll('.cfgExpandRoundBtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const roundIdx = Number(btn.dataset.round);
+      expandedRoundCards[roundIdx] = !expandedRoundCards[roundIdx];
+      renderGameSettings();
     });
   });
   el.querySelectorAll('.cfgCourseName').forEach(inp => {
@@ -3345,8 +3403,10 @@ function renderModalHole() {
     const n = ids.length;
     const order = (round.wolfOrder && round.wolfOrder.length === n) ? round.wolfOrder : playerIds();
     const orderDiv = document.getElementById('modalWolfOrderInputs');
+    // The LAST slot is the wolf (the wolf tees off last within the current
+    // teeing group) — every other slot is just a tee-off position.
     orderDiv.innerHTML = Array.from({ length: n }, (_, pos) => pos).map(pos => `
-      <div class="field"><label>Position ${pos + 1}</label>
+      <div class="field"><label>${pos === n - 1 ? '🐺 Wolf' : `Position ${pos + 1}`}</label>
         <select class="wolfOrderSelect" data-pos="${pos}">
           ${ids.map(id => `<option value="${id}" ${order[pos] === id ? 'selected' : ''}>${playerName(id)}</option>`).join('')}
         </select>
@@ -3430,8 +3490,15 @@ function renderModalHole() {
   if (round.type === 'wolf') {
     wolfBlock.style.display = 'block';
     matchupBlock.style.display = 'none';
-    const { wolf: wolfPlayer, others } = getWolfOrderForHole(round, modalHole, holeCountForModal);
-    document.getElementById('modalWolfWhoText').textContent = `${playerName(wolfPlayer)} is the wolf this hole.`;
+    const { wolf: wolfPlayer, others, teeOrder } = getWolfOrderForHole(round, modalHole, holeCountForModal);
+    // Teeing-off order for this hole, with the wolf (last to tee off)
+    // called out — makes the "who tees off when" pattern visible instead
+    // of just naming the wolf in isolation.
+    const orderHtml = teeOrder.map((id, i) => {
+      const isWolf = id === wolfPlayer;
+      return `<span${isWolf ? ' class="wolf-tee-highlight"' : ''}>${playerName(id)}${isWolf ? ' 🐺' : ''}</span>`;
+    }).join(' <span style="opacity:0.5;">→</span> ');
+    document.getElementById('modalWolfWhoText').innerHTML = `Teeing off: ${orderHtml}`;
     const current = hd.wolf ? hd.wolf.partner : 'lone';
     const opts = document.getElementById('modalWolfOptions');
     // choices: blind, one option per possible partner (2 or 3 depending on
@@ -3629,6 +3696,7 @@ function openCourseEditor(roundIdx, courseId) {
 
   let nameVal = '';
   let holesVal = defaultHoles(18);
+  let ctpVal = 8, ldVal = 13;
   courseEditorLength = 18;
   if (isEdit) {
     const lib = findCourseInLibrary(courseId);
@@ -3636,9 +3704,13 @@ function openCourseEditor(roundIdx, courseId) {
       nameVal = lib.name;
       courseEditorLength = (lib.holes || []).length <= 9 ? 9 : 18;
       holesVal = holesForSet(lib.holes, '18');
+      if (lib.default_ctp_hole) ctpVal = lib.default_ctp_hole;
+      if (lib.default_ld_hole) ldVal = lib.default_ld_hole;
     }
   }
   document.getElementById('courseEditorName').value = nameVal;
+  document.getElementById('courseEditorDefaultCtp').value = ctpVal;
+  document.getElementById('courseEditorDefaultLd').value = ldVal;
 
   const lengthRadios = document.getElementById('courseEditorLengthRadios');
   if (lengthRadios) {
@@ -3689,16 +3761,18 @@ document.getElementById('saveCourseBtn').addEventListener('click', async () => {
   const pars = Array.from(document.querySelectorAll('.courseEditorPar')).map(inp => Number(inp.value) || 4);
   const idxs = Array.from(document.querySelectorAll('.courseEditorIndex')).map(inp => Number(inp.value) || 1);
   const holes = pars.map((par, i) => ({ number: i + 1, par, index: idxs[i] }));
+  const defaultCtpHole = Math.min(Math.max(1, Number(document.getElementById('courseEditorDefaultCtp').value) || 1), holes.length);
+  const defaultLdHole = Math.min(Math.max(1, Number(document.getElementById('courseEditorDefaultLd').value) || 1), holes.length);
 
   const btn = document.getElementById('saveCourseBtn');
   btn.disabled = true;
   try {
-    const savedId = await saveCourseToLibrary(courseEditorCourseId, name, holes);
+    const savedId = await saveCourseToLibrary(courseEditorCourseId, name, holes, defaultCtpHole, defaultLdHole);
     if (!savedId) return; // saveCourseToLibrary already toasted the error
     // Apply the saved course to the round that triggered the editor, using
     // whatever hole set (18/front9/back9) that round is currently set to.
     if (courseEditorRoundIdx) {
-      applyLibraryCourseToRound(courseEditorRoundIdx, { id: savedId, name, holes });
+      applyLibraryCourseToRound(courseEditorRoundIdx, { id: savedId, name, holes, default_ctp_hole: defaultCtpHole, default_ld_hole: defaultLdHole });
     }
     closeCourseEditor();
     renderAll();
