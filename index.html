@@ -194,6 +194,11 @@
           <label class="radio-chip"><input type="radio" name="courseEditorLength" value="9"><span>9 Holes</span></label>
         </div>
       </div>
+      <div class="field-row">
+        <div class="field"><label>Default CTP Hole</label><input type="number" min="1" id="courseEditorDefaultCtp" value="8"></div>
+        <div class="field"><label>Default Longest Drive Hole</label><input type="number" min="1" id="courseEditorDefaultLd" value="13"></div>
+      </div>
+      <p class="helper-text" style="margin-top:-6px;">Pre-fills a round's CTP/Longest Drive holes whenever this course is loaded in — can still be changed per round afterward.</p>
       <p class="eyebrow" style="margin-top:0;">Pars &amp; Stroke Index</p>
       <p class="helper-text" style="margin-top:-4px;">Top box = par, bottom box = stroke index. An 18-hole course can be used as the front 9, back 9, or all 18 in a round. A 9-hole course is always used as its own 9 holes.</p>
       <div class="hole-grid" id="courseEditorHoleGrid"></div>
